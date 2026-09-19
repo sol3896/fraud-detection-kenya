@@ -12,7 +12,7 @@ RANDOM_STATE = 42
 
 print("Loading full dataset...")
 df = pd.read_csv(
-    "output/kenyanised/master_claims_kenya_clean.csv"
+    "output/kenyanised/master_claims_kenya_with_collusion.csv"
 )
 print(f"Full dataset: {df.shape}")
 
@@ -89,6 +89,6 @@ print(f"Fraud rate: {df_sample['IS_FRAUD'].mean()*100:.2f}%")
 print(f"Fraud breakdown:")
 print(df_sample["FRAUD_TYPE"].value_counts())
 
-OUT_PATH = "output/kenyanised/master_claims_sample_500k_13pct.csv"
+OUT_PATH = "output/kenyanised/master_claims_sample_500k_13pct_v2.csv"
 df_sample.to_csv(OUT_PATH, index=False)
 print(f"\nSample dataset saved to {OUT_PATH}")

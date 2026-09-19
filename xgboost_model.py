@@ -22,7 +22,7 @@ warnings.filterwarnings("ignore")
 # PATHS
 # ============================================================
 DATA_PATH = os.path.expanduser(
-    "~/synthea_kenya/output/kenyanised/master_claims_kenya_clean.csv"
+    "~/synthea_kenya/output/kenyanised/master_claims_sample_500k_13pct.csv"
 )
 OUTPUT_DIR = os.path.expanduser(
     "~/synthea_kenya/output/model"
@@ -50,9 +50,13 @@ print("\nStep 2: Selecting features...")
 categorical_features = [
     "ENCOUNTER_TYPE",
     "GENDER",
-    "PATIENT_COUNTY",
-    "FRAUD_TYPE"
+    "PATIENT_COUNTY"
 ]
+# NOTE: FRAUD_TYPE was deliberately dropped from the feature list.
+# FRAUD_TYPE is only known once a claim is already labelled fraudulent
+# ("none" for legitimate claims, "upcoding"/"phantom_billing" for fraud),
+# so including it as an input feature leaks the target and let the model
+# score a trivial, meaningless AUCPR of 1.0.
 
 # Numerical features
 numerical_features = [
