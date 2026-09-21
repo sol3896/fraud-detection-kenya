@@ -60,6 +60,7 @@ from imblearn.combine import SMOTEENN
 import xgboost as xgb
 import warnings
 import os
+import gc
 
 warnings.filterwarnings("ignore")
 
@@ -80,12 +81,20 @@ print("=" * 60)
 # STEP 0 - LOAD + BASE ENCODING (same as v1)
 # ============================================================
 print("\nLoading data...")
-df = pd.read_csv(DATA_PATH)
+NEEDED_COLS = list(set([
+    "BASE_COST_KES", "CLAIM_AMOUNT_KES", "PAYER_COVERAGE_KES", "CLAIM_TO_BASE_RATIO",
+    "AGE", "LENGTH_OF_STAY_HOURS", "ENCOUNTER_TYPE", "GENDER", "PATIENT_COUNTY",
+    "IS_FRAUD", "PRIMARY_CONDITION", "PROVIDER_ID", "SERVICE_DATE", "ENCOUNTER_ID",
+]))
+df = pd.read_csv(DATA_PATH, usecols=NEEDED_COLS)
 print(f"Dataset shape: {df.shape}, fraud rate: {df['IS_FRAUD'].mean()*100:.2f}%")
 
 categorical_features = ["ENCOUNTER_TYPE", "GENDER", "PATIENT_COUNTY"]
 le = LabelEncoder()
-df_model = df.copy()
+# No df.copy() here - df is not reused after this, so mutating it in place
+# (instead of holding two full 500k-row frames at once) avoids doubling
+# peak memory on the 3.8GB device sandbox.
+df_model = df
 for col in categorical_features:
     df_model[col + "_ENCODED"] = le.fit_transform(df_model[col].astype(str))
 encoded_categoricals = [c + "_ENCODED" for c in categorical_features]
@@ -144,7 +153,7 @@ print(df_model[["COST_RATIO", "PROVIDER_Z_SCORE", "PROVIDER_DAILY_VOLUME"]].desc
 COST_FEATURES = ["BASE_COST_KES", "CLAIM_AMOUNT_KES", "PAYER_COVERAGE_KES"]
 RATIO_FEATURE = ["CLAIM_TO_BASE_RATIO"]
 CONTEXT_FEATURES = ["COST_RATIO", "PROVIDER_Z_SCORE", "PROVIDER_DAILY_VOLUME"]
-OTHER_NUMERICAL = ["AGE", "PATIENT_INCOME", "LENGTH_OF_STAY_HOURS"]
+OTHER_NUMERICAL = ["AGE", "LENGTH_OF_STAY_HOURS"]  # PATIENT_INCOME removed - not applicable to unemployed/informal-sector patients
 
 FEATURE_COLUMNS = (
     COST_FEATURES + RATIO_FEATURE + CONTEXT_FEATURES + OTHER_NUMERICAL + encoded_categoricals
@@ -161,6 +170,12 @@ X_test = df_model.loc[idx_test, FEATURE_COLUMNS]
 y_train = y_full.loc[idx_train]
 y_val = y_full.loc[idx_val]
 y_test = y_full.loc[idx_test]
+
+# Free the full dataframe now that the feature slices are carved out - it's
+# not needed again, and holding it alive through SMOTE-ENN + training was
+# the likely cause of a silent OOM kill on this 3.8GB sandbox.
+del df_model, df, train_df, median_lookup, mean_lookup, std_lookup, daily_counts
+gc.collect()
 
 # ============================================================
 # SMOTE-ENN (on clean values, as in v1)
@@ -204,7 +219,7 @@ model = xgb.XGBClassifier(
     n_estimators=1000,
     early_stopping_rounds=30,
     random_state=RANDOM_STATE,
-    n_jobs=-1,
+    n_jobs=2, tree_method="hist",
 )
 model.fit(X_train_res, y_train_res, eval_set=[(X_val, y_val)], verbose=False)
 print(f"Best iteration: {model.best_iteration} (of 1000 max)")
