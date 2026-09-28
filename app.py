@@ -61,6 +61,196 @@ FEATURE_LABELS = {
 
 st.set_page_config(page_title="Kenya Health Claim Fraud Detection", page_icon="\U0001F6E1️", layout="wide")
 
+
+LIGHT_PALETTE = {
+    "bg": "#EEF2F6", "card": "#FBFCFD", "card_border": "#DCE3EA",
+    "text": "#1B2A36", "heading": "#14405E", "muted": "#5B7285",
+    "sidebar_grad": "linear-gradient(180deg, #123A54 0%, #0B2638 100%)",
+    "sidebar_text": "#E8F1F8",
+    "input_bg": "#FFFFFF", "input_border": "#C9D3DC",
+    "accent": "#14405E",
+}
+DARK_PALETTE = {
+    # Exact spec supplied by the user (their design-system table), not an
+    # approximation:
+    #   background #0B132B, surface/card #1C2541, primary text #F4F6FA,
+    #   secondary/muted text #94A3B8, accent (buttons/links) #00B4D8.
+    "bg": "#0B132B", "card": "#1C2541", "card_border": "#2E3B5E",
+    "text": "#F4F6FA", "heading": "#F4F6FA", "muted": "#94A3B8",
+    "sidebar_grad": "linear-gradient(180deg, #1C2541 0%, #0B132B 100%)",
+    "sidebar_text": "#F4F6FA",
+    "input_bg": "#1C2541", "input_border": "#2E3B5E",
+    "accent": "#00B4D8",
+}
+
+
+def inject_theme(dark: bool = False):
+    """Purely cosmetic - a consistent theme (colors, font, card styling) on
+    top of Streamlit's defaults, with an optional dark palette. Uses
+    data-testid selectors, which are the stable part of Streamlit's DOM
+    across recent versions, rather than generated class names, which change
+    between releases. Doesn't touch any app logic - safe to skip if a future
+    Streamlit version doesn't match a selector, it just falls back to
+    default styling for that bit.
+
+    Known limitation: st.dataframe renders through its own internal grid
+    component (not plain HTML/CSS), so its cell colors may not fully follow
+    this toggle - only the border/corners around it are guaranteed to.
+    """
+    c = DARK_PALETTE if dark else LIGHT_PALETTE
+    st.markdown(f"""
+        <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+        html, body, [class*="css"] {{
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+        }}
+        h1, h2, h3 {{ color: {c['heading']}; font-weight: 700; }}
+        p, span, label, .stMarkdown, .stCaption {{ color: {c['text']}; }}
+
+        /* Page background */
+        [data-testid="stAppViewContainer"] {{
+            background-color: {c['bg']};
+        }}
+
+        /* Streamlit's own top toolbar - unstyled by default, so it was
+           clashing hard against a dark page (a bright white strip at the
+           very top of the app). */
+        [data-testid="stHeader"] {{
+            background-color: {c['bg']} !important;
+        }}
+        [data-testid="stHeader"] * {{ color: {c['text']} !important; }}
+        [data-testid="stToolbar"] * {{ color: {c['text']} !important; }}
+
+        /* Text/number/date/password inputs - style the actual <input>
+           element directly (guaranteed to exist) rather than relying on a
+           parent wrapper div, whose exact class/testid varies and wasn't
+           matching - that's why these were still showing plain white. */
+        input, textarea {{
+            background-color: {c['input_bg']} !important;
+            color: {c['text']} !important;
+            border: 1px solid {c['input_border']} !important;
+            border-radius: 8px !important;
+        }}
+        [data-baseweb="input"], [data-baseweb="base-input"] {{
+            background-color: {c['input_bg']} !important;
+            border-radius: 8px !important;
+        }}
+        /* The show/hide-password eye icon button - previously kept its
+           default white square background regardless of theme. Scoped to
+           the whole stTextInput widget (not just the inner wrapper) since
+           the button can sit outside that inner wrapper. */
+        [data-testid="stTextInput"] button {{
+            background-color: transparent !important;
+        }}
+        [data-testid="stTextInput"] button svg {{
+            fill: {c['muted']} !important;
+        }}
+
+        /* Selectboxes */
+        [data-baseweb="select"] > div {{
+            background-color: {c['input_bg']} !important;
+            border-color: {c['input_border']} !important;
+        }}
+        [data-baseweb="select"] * {{ color: {c['text']} !important; }}
+        [data-baseweb="popover"] {{ background-color: {c['input_bg']} !important; }}
+        [data-baseweb="popover"] * {{ color: {c['text']} !important; }}
+
+        /* Sidebar */
+        [data-testid="stSidebar"] {{
+            background: {c['sidebar_grad']};
+        }}
+        /* Only text-bearing elements go light in the sidebar - NOT buttons,
+           which are styled explicitly below. (An earlier version used a
+           blanket "* {{ color }}" rule here that also turned button text
+           light, making buttons with a light background invisible.) */
+        [data-testid="stSidebar"] p,
+        [data-testid="stSidebar"] span,
+        [data-testid="stSidebar"] label,
+        [data-testid="stSidebar"] h1,
+        [data-testid="stSidebar"] h2,
+        [data-testid="stSidebar"] h3,
+        [data-testid="stSidebar"] .stMarkdown {{
+            color: {c['sidebar_text']} !important;
+        }}
+        [data-testid="stSidebar"] hr {{ border-color: rgba(255,255,255,0.15); }}
+
+        /* Sidebar buttons: explicit light-on-dark "ghost button" style so
+           they're always visible against the dark sidebar background,
+           regardless of light/dark mode. */
+        [data-testid="stSidebar"] .stButton button {{
+            background-color: rgba(255,255,255,0.12) !important;
+            color: #FFFFFF !important;
+            border: 1px solid rgba(255,255,255,0.35) !important;
+        }}
+        [data-testid="stSidebar"] .stButton button:hover {{
+            background-color: rgba(255,255,255,0.22) !important;
+        }}
+
+        /* Buttons (main content area) */
+        .stButton button, [data-testid="stFormSubmitButton"] button {{
+            border-radius: 8px;
+            font-weight: 600;
+            transition: all 0.15s ease;
+        }}
+        .stButton button:hover, [data-testid="stFormSubmitButton"] button:hover {{
+            transform: translateY(-1px);
+            box-shadow: 0 3px 8px rgba(0,0,0,0.25);
+        }}
+        /* Primary ("Log in", "Submit claim", etc.) buttons - explicitly tied
+           to the accent color so they switch with the toggle. Without this
+           they'd fall back to config.toml's static primaryColor, which never
+           changes for dark mode. */
+        .stButton button[kind="primary"], [data-testid="stFormSubmitButton"] button[kind="primary"] {{
+            background-color: {c['accent']} !important;
+            border-color: {c['accent']} !important;
+            color: {'#0B132B' if dark else '#FFFFFF'} !important;
+        }}
+        .stButton button[kind="primary"]:hover, [data-testid="stFormSubmitButton"] button[kind="primary"]:hover {{
+            filter: brightness(1.1);
+        }}
+        /* Links and other accent-colored text */
+        a, a:visited {{ color: {c['accent']} !important; }}
+
+        /* Metric cards */
+        [data-testid="stMetric"] {{
+            background: {c['card']};
+            border: 1px solid {c['card_border']};
+            border-radius: 12px;
+            padding: 0.9rem 1.1rem;
+            box-shadow: 0 1px 2px rgba(0,0,0,0.08);
+        }}
+        [data-testid="stMetricLabel"] {{ color: {c['muted']}; font-weight: 500; }}
+        [data-testid="stMetricValue"] {{ color: {c['heading']}; font-weight: 700; }}
+
+        /* Dataframes / tables - border only; see docstring caveat above */
+        [data-testid="stDataFrame"] {{
+            border-radius: 10px;
+            overflow: hidden;
+            border: 1px solid {c['card_border']};
+        }}
+
+        /* Form containers (login, claim submission, etc.) get a card look */
+        [data-testid="stForm"] {{
+            background: {c['card']};
+            border: 1px solid {c['card_border']};
+            border-radius: 16px;
+            padding: 1.6rem 1.8rem;
+            box-shadow: 0 4px 14px rgba(0,0,0,0.08);
+        }}
+
+        /* Bordered st.container() cards */
+        [data-testid="stVerticalBlockBorderWrapper"] {{
+            background: {c['card']};
+            border-radius: 16px !important;
+            box-shadow: 0 4px 14px rgba(0,0,0,0.08);
+        }}
+        </style>
+    """, unsafe_allow_html=True)
+
+
+inject_theme(st.session_state.get("dark_mode", False))
+
 # ============================================================
 # CACHED LOADERS
 # ============================================================
@@ -277,31 +467,52 @@ def log_claim(conn, raw, source, username, score, label):
 # LOGIN
 # ============================================================
 def login_screen(conn):
-    st.title("\U0001F6E1️ Kenya Health Claim Fraud Detection")
-    st.caption("An Explainable Healthcare Claim Fraud Detection System for Kenyan Insurance Companies")
-    st.subheader("Sign in")
-    with st.form("login_form"):
-        username = st.text_input("Username")
-        password = st.text_input("Password", type="password")
-        submitted = st.form_submit_button("Log in")
-    if submitted:
-        cur = conn.execute("SELECT password_hash, role FROM users WHERE username = ?", (username,))
-        row = cur.fetchone()
-        if row and row[0] == hash_password(password):
-            st.session_state.logged_in = True
-            st.session_state.username = username
-            st.session_state.role = row[1]
-            st.rerun()
-        else:
-            st.error("Invalid username or password.")
-    st.info(
-        "Demo accounts: **admin** / **admin123** (role: admin), "
-        "**auditor1** / **auditor123** (role: auditor). "
-        "Role is set per account (see Manage users), not chosen at login - "
-        "that's deliberate, letting someone pick their own access level at "
-        "sign-in would defeat the point of having roles on a fraud system."
-    )
-    st.caption("Forgot password? Contact your System Admin.")
+    top_l, top_r = st.columns([5, 1])
+    with top_r:
+        st.toggle("\U0001F319 Dark mode", key="dark_mode")
+
+    col_l, col_mid, col_r = st.columns([1, 1.3, 1])
+    with col_mid:
+        st.markdown(
+            "<div style='text-align:center; font-size:2.6rem; margin-bottom:0.2rem;'>"
+            "\U0001F6E1️</div>",
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            "<h1 style='text-align:center; font-size:1.6rem; margin-bottom:0.2rem;'>"
+            "Kenya Health Claim Fraud Detection</h1>",
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            "<p style='text-align:center; color:#5B7285; margin-bottom:1.6rem;'>"
+            "An Explainable Healthcare Claim Fraud Detection System for "
+            "Kenyan Insurance Companies</p>",
+            unsafe_allow_html=True,
+        )
+        with st.form("login_form"):
+            st.markdown("**Sign in**")
+            username = st.text_input("Username")
+            password = st.text_input("Password", type="password")
+            submitted = st.form_submit_button("Log in", type="primary", use_container_width=True)
+        if submitted:
+            cur = conn.execute("SELECT password_hash, role FROM users WHERE username = ?", (username,))
+            row = cur.fetchone()
+            if row and row[0] == hash_password(password):
+                st.session_state.logged_in = True
+                st.session_state.username = username
+                st.session_state.role = row[1]
+                st.rerun()
+            else:
+                st.error("Invalid username or password.")
+        st.info(
+            "Demo accounts: **admin** / **admin123** (admin), "
+            "**auditor1** / **auditor123** (auditor), "
+            "**nurse1** / **nurse123** (nurse). "
+            "Role is set per account (see Manage users), not chosen at login - "
+            "that's deliberate, letting someone pick their own access level at "
+            "sign-in would defeat the point of having roles on a fraud system."
+        )
+        st.caption("Forgot password? Contact your System Admin.")
 
 
 # ============================================================
@@ -877,18 +1088,49 @@ def manage_users_page(conn):
     users_df = pd.read_sql_query("SELECT username, role FROM users ORDER BY username", conn)
     st.dataframe(users_df, use_container_width=True)
 
+    admin_count = int((users_df["role"] == "admin").sum())
+
+    st.divider()
+    st.subheader("Edit a user's role")
+    if users_df.empty:
+        st.caption("No users yet.")
+    else:
+        edit_username = st.selectbox("Select a user", users_df["username"].tolist(), key="edit_role_user")
+        current_role = users_df.loc[users_df["username"] == edit_username, "role"].iloc[0]
+        st.caption(f"Current role: **{current_role}**")
+        new_role_for_edit = st.selectbox(
+            "New role", ROLES,
+            index=ROLES.index(current_role) if current_role in ROLES else 0,
+            key="edit_role_value",
+        )
+        if st.button("Update role", type="primary"):
+            if current_role == "admin" and new_role_for_edit != "admin" and admin_count <= 1:
+                st.error("Can't change this account's role - it's the only remaining admin. "
+                         "Create another admin account first if you want to demote this one.")
+            elif new_role_for_edit == current_role:
+                st.info("No change - that's already this account's role.")
+            else:
+                conn.execute("UPDATE users SET role = ? WHERE username = ?", (new_role_for_edit, edit_username))
+                conn.commit()
+                st.success(f"'{edit_username}' role changed from '{current_role}' to '{new_role_for_edit}'.")
+                st.rerun()
+
     st.divider()
     st.subheader("Remove a user")
-    removable = [u for u in users_df["username"] if u != "admin"]
+    admin_usernames = set(users_df.loc[users_df["role"] == "admin", "username"])
+    if admin_count <= 1:
+        removable = [u for u in users_df["username"] if u not in admin_usernames]
+    else:
+        removable = list(users_df["username"])
     if removable:
-        to_remove = st.selectbox("Select a user to remove", removable)
+        to_remove = st.selectbox("Select a user to remove", removable, key="remove_user_select")
         if st.button("Remove user", type="secondary"):
             conn.execute("DELETE FROM users WHERE username = ?", (to_remove,))
             conn.commit()
             st.success(f"User '{to_remove}' removed.")
             st.rerun()
     else:
-        st.caption("No removable users (the admin account can't be removed here).")
+        st.caption("No removable users (can't remove the only remaining admin account).")
 
 
 # ============================================================
@@ -906,6 +1148,8 @@ def main():
 
     st.sidebar.title("\U0001F6E1️ Fraud Detection")
     st.sidebar.caption(f"Signed in as **{st.session_state.username}**  ·  role: **{role}**")
+    st.sidebar.toggle("\U0001F319 Dark mode", key="dark_mode")
+    st.sidebar.divider()
 
     nav_options = []
     if role == "nurse":
