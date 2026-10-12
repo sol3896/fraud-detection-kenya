@@ -1,17 +1,15 @@
 """
 XGBOOST FRAUD MODEL - v3 THRESHOLD TUNING (adaptive triage)
 
-Motivation: v2's F1 still dropped under noise (0.72 at 5%, 0.58 at 10%)
-because it kept the default 0.5 decision cutoff. F1 is threshold-sensitive
-in a way PR-AUC isn't - the model's RANKING of fraud vs legitimate barely
-degraded (PR-AUC only fell from 0.99 to 0.81-0.93), but 0.5 stopped being
-a good cutoff once claim scores got noisier. This script fixes that with
-two changes, both tuned on the VALIDATION split only (never on test):
+Motivation: v2's F1 still dropped under noise because it kept the default
+0.5 decision cutoff. F1 is threshold-sensitive in a way PR-AUC isn't - the
+model's RANKING of fraud vs legitimate barely degrades under noise, but 0.5
+stops being a good cutoff once claim scores get noisier. This script fixes
+that with two changes, both tuned on the VALIDATION split only (never test):
 
   1. GLOBAL THRESHOLD TUNING
      Instead of the default 0.5, find the threshold that maximizes F1 on
-     the clean validation set via precision_recall_curve. This alone
-     recovers most of the lost F1 on clean and lightly-noisy data.
+     the clean validation set via precision_recall_curve.
 
   2. ADAPTIVE DUAL-THRESHOLD TRIAGE (the real-world deployment version)
      A single global threshold can't be both "confident enough to
@@ -26,31 +24,32 @@ two changes, both tuned on the VALIDATION split only (never on test):
          queue instead of auto-clearing.
      The adaptive rule only relaxes the threshold for rows the pipeline
      can tell are incomplete (at least one missing cost field) - a
-     complete row still needs to clear the stricter t_high bar. This
-     mirrors how a real Kenyan SHA/insurer fraud unit would want to
-     operate: don't silently drop a claim just because a field is
-     missing - route it to a human instead of guessing.
+     complete row still needs to clear the stricter t_high bar.
 
-     Caveat: "incomplete" here is measured directly (a NaN in a cost
-     field), which is exactly what our synthetic noise experiment can
-     inject and detect. True "high variance" scoring (e.g. from model
-     ensemble disagreement) would need multiple models/seeds and is a
-     natural extension, not implemented here.
+Re-trains its own copy of the v2-robust model (same architecture, same
+feature engineering) so this script is self-contained and purely
+demonstrates the threshold-tuning methodology - the actual t_high/t_low
+values used by the live dashboard come from export_model_artifacts.py,
+which derives them the same way but against the exact model file the app
+loads.
 
-Re-trains the same v2-robust model (missingness training + contextual
-features + regularized hyperparameters) so this script is self-contained.
+REVISION (v2.1) - matches xgboost_model_v2_robust.py: v2 data (has
+collusion_ring), one-hot encoding (via SMOTENC + post-resampling encoding,
+for the same dimensionality reasons documented there), and PATIENT_INCOME
+dropped from OTHER_NUMERICAL (the original version of this script still had
+it, inconsistent with the production training script, which already
+excludes it as not applicable to unemployed/informal-sector patients).
 """
 
 import pandas as pd
 import numpy as np
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import LabelEncoder
 from sklearn.metrics import (
     f1_score, precision_score, recall_score,
     balanced_accuracy_score, average_precision_score,
     precision_recall_curve,
 )
-from imblearn.combine import SMOTEENN
+from imblearn.over_sampling import SMOTENC
 import xgboost as xgb
 import warnings
 import os
@@ -62,7 +61,7 @@ MISSING_FRAC = 0.08
 TARGET_RECALL = 0.95  # for the manual-review threshold t_low
 
 DATA_PATH = os.path.expanduser(
-    "~/synthea_kenya/output/kenyanised/master_claims_sample_500k_13pct.csv"
+    "~/synthea_kenya/output/kenyanised/master_claims_sample_500k_13pct_v2.csv"
 )
 OUTPUT_DIR = os.path.expanduser("~/synthea_kenya/output/model")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -72,21 +71,30 @@ print("XGBOOST FRAUD MODEL - v3 THRESHOLD TUNING / ADAPTIVE TRIAGE")
 print("=" * 60)
 
 # ============================================================
-# LOAD + ENCODE + SPLIT (identical to v2)
+# LOAD + SPLIT (categoricals stay raw - SMOTENC needs them raw)
 # ============================================================
 print("\nLoading data...")
 df = pd.read_csv(DATA_PATH)
 
 categorical_features = ["ENCOUNTER_TYPE", "GENDER", "PATIENT_COUNTY"]
-le = LabelEncoder()
-df_model = df.copy()
 for col in categorical_features:
-    df_model[col + "_ENCODED"] = le.fit_transform(df_model[col].astype(str))
-encoded_categoricals = [c + "_ENCODED" for c in categorical_features]
+    df[col] = df[col].astype(str)
+onehot_categories = {col: sorted(df[col].unique().tolist()) for col in categorical_features}
+encoded_categoricals = [f"{col}_{cat}" for col in categorical_features for cat in onehot_categories[col]]
 
-y_full = df_model["IS_FRAUD"]
+
+def onehot_encode(df_slice, categorical_cols, categories):
+    out = df_slice.drop(columns=categorical_cols).copy()
+    for col in categorical_cols:
+        values = df_slice[col].astype(str)
+        for cat in categories[col]:
+            out[f"{col}_{cat}"] = (values == cat).astype(int)
+    return out
+
+
+y_full = df["IS_FRAUD"]
 idx_train, idx_temp = train_test_split(
-    df_model.index, test_size=0.30, random_state=RANDOM_STATE, stratify=y_full
+    df.index, test_size=0.30, random_state=RANDOM_STATE, stratify=y_full
 )
 idx_val, idx_test = train_test_split(
     idx_temp, test_size=0.50, random_state=RANDOM_STATE, stratify=y_full.loc[idx_temp]
@@ -95,51 +103,55 @@ idx_val, idx_test = train_test_split(
 # ============================================================
 # CONTEXTUAL FEATURES (fit on train only, identical to v2)
 # ============================================================
-train_df = df_model.loc[idx_train]
+train_df = df.loc[idx_train]
 
 group_cols = ["PRIMARY_CONDITION", "PATIENT_COUNTY"]
 group_median = train_df.groupby(group_cols)["CLAIM_AMOUNT_KES"].median()
 global_median = train_df["CLAIM_AMOUNT_KES"].median()
-median_lookup = df_model[group_cols].apply(tuple, axis=1).map(group_median).fillna(global_median)
-df_model["COST_RATIO"] = (df_model["CLAIM_AMOUNT_KES"] / median_lookup.replace(0, np.nan)).fillna(1.0)
+median_lookup = df[group_cols].apply(tuple, axis=1).map(group_median).fillna(global_median)
+df["COST_RATIO"] = (df["CLAIM_AMOUNT_KES"] / median_lookup.replace(0, np.nan)).fillna(1.0)
 
 provider_mean = train_df.groupby("PROVIDER_ID")["CLAIM_AMOUNT_KES"].mean()
 provider_std = train_df.groupby("PROVIDER_ID")["CLAIM_AMOUNT_KES"].std()
 global_mean = train_df["CLAIM_AMOUNT_KES"].mean()
 global_std = train_df["CLAIM_AMOUNT_KES"].std()
-mean_lookup = df_model["PROVIDER_ID"].map(provider_mean).fillna(global_mean)
-std_lookup = df_model["PROVIDER_ID"].map(provider_std).fillna(global_std).replace(0, global_std)
-df_model["PROVIDER_Z_SCORE"] = ((df_model["CLAIM_AMOUNT_KES"] - mean_lookup) / std_lookup).fillna(0.0)
+mean_lookup = df["PROVIDER_ID"].map(provider_mean).fillna(global_mean)
+std_lookup = df["PROVIDER_ID"].map(provider_std).fillna(global_std).replace(0, global_std)
+df["PROVIDER_Z_SCORE"] = ((df["CLAIM_AMOUNT_KES"] - mean_lookup) / std_lookup).fillna(0.0)
 
-daily_counts = df_model.groupby(["PROVIDER_ID", "SERVICE_DATE"])["ENCOUNTER_ID"].transform("count")
-df_model["PROVIDER_DAILY_VOLUME"] = daily_counts
+daily_counts = df.groupby(["PROVIDER_ID", "SERVICE_DATE"])["ENCOUNTER_ID"].transform("count")
+df["PROVIDER_DAILY_VOLUME"] = daily_counts
 
 COST_FEATURES = ["BASE_COST_KES", "CLAIM_AMOUNT_KES", "PAYER_COVERAGE_KES"]
 RATIO_FEATURE = ["CLAIM_TO_BASE_RATIO"]
 CONTEXT_FEATURES = ["COST_RATIO", "PROVIDER_Z_SCORE", "PROVIDER_DAILY_VOLUME"]
-OTHER_NUMERICAL = ["AGE", "PATIENT_INCOME", "LENGTH_OF_STAY_HOURS"]
+OTHER_NUMERICAL = ["AGE", "LENGTH_OF_STAY_HOURS"]  # PATIENT_INCOME removed - not applicable to unemployed/informal-sector patients
+RAW_FEATURE_COLUMNS = COST_FEATURES + RATIO_FEATURE + CONTEXT_FEATURES + OTHER_NUMERICAL + categorical_features
 FEATURE_COLUMNS = COST_FEATURES + RATIO_FEATURE + CONTEXT_FEATURES + OTHER_NUMERICAL + encoded_categoricals
 NOISY_COLUMNS = COST_FEATURES + RATIO_FEATURE + ["COST_RATIO", "PROVIDER_Z_SCORE"]
 
-X_train = df_model.loc[idx_train, FEATURE_COLUMNS]
-X_val = df_model.loc[idx_val, FEATURE_COLUMNS]
-X_test = df_model.loc[idx_test, FEATURE_COLUMNS]
+X_train_raw = df.loc[idx_train, RAW_FEATURE_COLUMNS]
+X_val = onehot_encode(df.loc[idx_val, RAW_FEATURE_COLUMNS], categorical_features, onehot_categories)[FEATURE_COLUMNS]
+X_test = onehot_encode(df.loc[idx_test, RAW_FEATURE_COLUMNS], categorical_features, onehot_categories)[FEATURE_COLUMNS]
 y_train = y_full.loc[idx_train]
 y_val = y_full.loc[idx_val]
 y_test = y_full.loc[idx_test]
 
 # ============================================================
-# SMOTE-ENN + missingness-injected training (identical to v2)
+# SMOTENC + missingness-injected training (identical approach to v2.1)
 # ============================================================
-print("\nApplying SMOTE-ENN + training-time missingness injection...")
-smote_enn = SMOTEENN(random_state=RANDOM_STATE)
-X_train_res, y_train_res = smote_enn.fit_resample(X_train, y_train)
+print("\nApplying SMOTENC oversampling + training-time missingness injection...")
+cat_idx = [RAW_FEATURE_COLUMNS.index(c) for c in categorical_features]
+smote_nc = SMOTENC(categorical_features=cat_idx, random_state=RANDOM_STATE)
+X_train_res_raw, y_train_res = smote_nc.fit_resample(X_train_raw, y_train)
 
 rng = np.random.default_rng(RANDOM_STATE)
-X_train_res = X_train_res.reset_index(drop=True)
+X_train_res_raw = X_train_res_raw.reset_index(drop=True)
 for col in NOISY_COLUMNS:
-    mask = rng.random(len(X_train_res)) < MISSING_FRAC
-    X_train_res.loc[mask, col] = np.nan
+    mask = rng.random(len(X_train_res_raw)) < MISSING_FRAC
+    X_train_res_raw.loc[mask, col] = np.nan
+
+X_train_res = onehot_encode(X_train_res_raw, categorical_features, onehot_categories)[FEATURE_COLUMNS]
 
 neg = sum(y_train_res == 0)
 pos = sum(y_train_res == 1)
@@ -150,7 +162,7 @@ model = xgb.XGBClassifier(
     scale_pos_weight=scale_pos_weight,
     max_depth=4, subsample=0.8, colsample_bytree=0.7, learning_rate=0.05,
     n_estimators=1000, early_stopping_rounds=30,
-    random_state=RANDOM_STATE, n_jobs=-1,
+    random_state=RANDOM_STATE, n_jobs=2, tree_method="hist",
 )
 model.fit(X_train_res, y_train_res, eval_set=[(X_val, y_val)], verbose=False)
 print(f"Model trained. Best iteration: {model.best_iteration}")
@@ -205,8 +217,6 @@ X_val_noisy = corrupt(X_val, MISSING_FRAC, seed=RANDOM_STATE)
 y_val_proba_noisy = model.predict_proba(X_val_noisy)[:, 1]
 precisions_n, recalls_n, pr_thresholds_n = precision_recall_curve(y_val, y_val_proba_noisy)
 
-# thresholds are ascending; recall is non-increasing as threshold rises.
-# Find the highest threshold that still achieves >= TARGET_RECALL.
 eligible = np.where(recalls_n[:-1] >= TARGET_RECALL)[0]
 if len(eligible) > 0:
     t_low_idx = eligible[np.argmax(pr_thresholds_n[eligible])]
@@ -237,8 +247,6 @@ def eval_fixed(X, y, threshold, label):
 def eval_adaptive(X, y, t_high, t_low, label):
     proba = model.predict_proba(X)[:, 1]
     incomplete = is_incomplete(X).values
-    # Complete rows need the stricter t_high bar; incomplete rows are
-    # "flagged" (treated as positive/needs-review) at the lower t_low bar.
     pred = np.where(incomplete, proba >= t_low, proba >= t_high).astype(int)
     n_flagged_for_review = int((incomplete & (proba >= t_low) & (proba < t_high)).sum())
     return {

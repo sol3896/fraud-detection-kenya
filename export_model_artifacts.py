@@ -10,31 +10,45 @@ xgboost_model_v2_robust.py's docstring - this is deliberate, to avoid
 leakage). Re-fitting those lookups from scratch on every dashboard restart
 would be slow and would silently drift from the validated model's inputs.
 
-This script reproduces the EXACT same load -> encode -> split -> engineer
-pipeline as xgboost_model_v2_robust.py / xgboost_threshold_tuning.py (same
-RANDOM_STATE=42, same train/val/test split), so the lookups are guaranteed
-to match what the saved model was actually trained/tuned against. It does
-NOT retrain the model - it loads the already-saved, already-verified
-xgboost_fraud_model_v2_robust.json - and instead:
+This script reproduces the EXACT same load -> split -> engineer -> encode
+pipeline as xgboost_model_v2_robust.py (same RANDOM_STATE=42, same
+DATA_PATH, same train/val/test split, same fixed one-hot category
+vocabulary), so the lookups are guaranteed to match what the saved model
+was actually trained/tuned against. It does NOT retrain the model and does
+NOT resample (resampling only ever affected the training set's class
+balance - it has no bearing on lookups fit from idx_train or on the t_high
+/ t_low thresholds, which are derived on the untouched validation set) - it
+loads the already-saved, already-verified xgboost_fraud_model_v2_robust.json
+- and instead:
 
   1. Rebuilds the train-only lookups (group cost median, provider mean/std,
      provider historical daily volume) and saves them as JSON.
-  2. Re-derives t_high / t_low exactly as xgboost_threshold_tuning.py does,
-     so the dashboard's traffic-light thresholds match the validated
-     adaptive-triage numbers, not a hand-typed copy of them.
+  2. Re-derives t_high / t_low exactly as before, so the dashboard's
+     traffic-light thresholds match the validated adaptive-triage numbers,
+     not a hand-typed copy of them.
   3. Saves dropdown reference data (known providers + their org IDs and
      historical claim volume, known counties/conditions/encounter types)
      so the Streamlit form can offer realistic choices instead of free text.
 
-Output: output/model/dashboard_artifacts.json
+REVISION (v2.1) - matches xgboost_model_v2_robust.py's changes:
+  - DATA SOURCE: master_claims_sample_500k_13pct_v2.csv (has collusion_ring
+    fraud; the old file didn't).
+  - ENCODING: one-hot with a FIXED category vocabulary (same deterministic
+    onehot_categories dict the training script builds), saved into the
+    artifacts as "onehot_categories" instead of the old "label_encoders".
+    app.py's engineer_row() builds the one-hot vector for a live claim
+    directly from that list.
+  - The earlier version of this script also ran SMOTE-ENN here before
+    loading the model, but its output (X_train_res/y_train_res) was never
+    actually used afterward - dead code left over from copying the training
+    script's structure. Removed; this script never needed resampling in the
+    first place; it only reads lookups and thresholds.
 """
 
 import pandas as pd
 import numpy as np
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import LabelEncoder
 from sklearn.metrics import precision_recall_curve
-from imblearn.combine import SMOTEENN
 import xgboost as xgb
 import warnings
 import os
@@ -47,7 +61,7 @@ MISSING_FRAC = 0.08
 TARGET_RECALL = 0.95
 
 DATA_PATH = os.path.expanduser(
-    "~/synthea_kenya/output/kenyanised/master_claims_sample_500k_13pct.csv"
+    "~/synthea_kenya/output/kenyanised/master_claims_sample_500k_13pct_v2.csv"
 )
 MODEL_PATH = os.path.expanduser(
     "~/synthea_kenya/output/model/xgboost_fraud_model_v2_robust.json"
@@ -60,29 +74,38 @@ df = pd.read_csv(DATA_PATH)
 print(f"Shape: {df.shape}, fraud rate: {df['IS_FRAUD'].mean()*100:.2f}%")
 
 categorical_features = ["ENCOUNTER_TYPE", "GENDER", "PATIENT_COUNTY"]
-le_map = {}
-df_model = df.copy()
 for col in categorical_features:
-    le = LabelEncoder()
-    df_model[col + "_ENCODED"] = le.fit_transform(df_model[col].astype(str))
-    le_map[col] = list(le.classes_)  # index = encoded value
-encoded_categoricals = [c + "_ENCODED" for c in categorical_features]
+    df[col] = df[col].astype(str)
+# Same fixed, full-dataset category vocabulary as the training script -
+# must match exactly so the model's expected columns line up.
+onehot_categories = {col: sorted(df[col].unique().tolist()) for col in categorical_features}
+encoded_categoricals = [f"{col}_{cat}" for col in categorical_features for cat in onehot_categories[col]]
 
-y_full = df_model["IS_FRAUD"]
+
+def onehot_encode(df_slice: pd.DataFrame, categorical_cols, categories: dict) -> pd.DataFrame:
+    out = df_slice.drop(columns=categorical_cols).copy()
+    for col in categorical_cols:
+        values = df_slice[col].astype(str)
+        for cat in categories[col]:
+            out[f"{col}_{cat}"] = (values == cat).astype(int)
+    return out
+
+
+y_full = df["IS_FRAUD"]
 idx_train, idx_temp = train_test_split(
-    df_model.index, test_size=0.30, random_state=RANDOM_STATE, stratify=y_full
+    df.index, test_size=0.30, random_state=RANDOM_STATE, stratify=y_full
 )
 idx_val, idx_test = train_test_split(
     idx_temp, test_size=0.50, random_state=RANDOM_STATE, stratify=y_full.loc[idx_temp]
 )
-train_df = df_model.loc[idx_train]
+train_df = df.loc[idx_train]
 
 # --- COST_RATIO lookup: (PRIMARY_CONDITION, PATIENT_COUNTY) -> median ---
 group_cols = ["PRIMARY_CONDITION", "PATIENT_COUNTY"]
 group_median = train_df.groupby(group_cols)["CLAIM_AMOUNT_KES"].median()
 global_median = float(train_df["CLAIM_AMOUNT_KES"].median())
-median_lookup = df_model[group_cols].apply(tuple, axis=1).map(group_median).fillna(global_median)
-df_model["COST_RATIO"] = (df_model["CLAIM_AMOUNT_KES"] / median_lookup.replace(0, np.nan)).fillna(1.0)
+median_lookup = df[group_cols].apply(tuple, axis=1).map(group_median).fillna(global_median)
+df["COST_RATIO"] = (df["CLAIM_AMOUNT_KES"] / median_lookup.replace(0, np.nan)).fillna(1.0)
 # JSON keys must be strings -> join tuple with a separator unlikely to collide
 group_median_lookup = {f"{c}||{co}": float(v) for (c, co), v in group_median.items()}
 
@@ -91,43 +114,31 @@ provider_mean = train_df.groupby("PROVIDER_ID")["CLAIM_AMOUNT_KES"].mean()
 provider_std = train_df.groupby("PROVIDER_ID")["CLAIM_AMOUNT_KES"].std()
 global_mean = float(train_df["CLAIM_AMOUNT_KES"].mean())
 global_std = float(train_df["CLAIM_AMOUNT_KES"].std())
-mean_lookup = df_model["PROVIDER_ID"].map(provider_mean).fillna(global_mean)
-std_lookup = df_model["PROVIDER_ID"].map(provider_std).fillna(global_std).replace(0, global_std)
-df_model["PROVIDER_Z_SCORE"] = ((df_model["CLAIM_AMOUNT_KES"] - mean_lookup) / std_lookup).fillna(0.0)
+mean_lookup = df["PROVIDER_ID"].map(provider_mean).fillna(global_mean)
+std_lookup = df["PROVIDER_ID"].map(provider_std).fillna(global_std).replace(0, global_std)
+df["PROVIDER_Z_SCORE"] = ((df["CLAIM_AMOUNT_KES"] - mean_lookup) / std_lookup).fillna(0.0)
 provider_mean_lookup = {str(k): float(v) for k, v in provider_mean.items()}
 provider_std_lookup = {str(k): float(v) for k, v in provider_std.items() if pd.notna(v)}
 
 # --- PROVIDER_DAILY_VOLUME: historical average, used as a baseline the app
 # adds today's app-submitted claims on top of (see app.py) ---
-daily_counts = df_model.groupby(["PROVIDER_ID", "SERVICE_DATE"])["ENCOUNTER_ID"].transform("count")
-df_model["PROVIDER_DAILY_VOLUME"] = daily_counts
+daily_counts = df.groupby(["PROVIDER_ID", "SERVICE_DATE"])["ENCOUNTER_ID"].transform("count")
+df["PROVIDER_DAILY_VOLUME"] = daily_counts
 provider_avg_daily_volume = (
-    df_model.groupby("PROVIDER_ID")["PROVIDER_DAILY_VOLUME"].mean().to_dict()
+    df.groupby("PROVIDER_ID")["PROVIDER_DAILY_VOLUME"].mean().to_dict()
 )
 provider_avg_daily_volume = {str(k): float(v) for k, v in provider_avg_daily_volume.items()}
-global_avg_daily_volume = float(df_model["PROVIDER_DAILY_VOLUME"].mean())
+global_avg_daily_volume = float(df["PROVIDER_DAILY_VOLUME"].mean())
 
 COST_FEATURES = ["BASE_COST_KES", "CLAIM_AMOUNT_KES", "PAYER_COVERAGE_KES"]
 RATIO_FEATURE = ["CLAIM_TO_BASE_RATIO"]
 CONTEXT_FEATURES = ["COST_RATIO", "PROVIDER_Z_SCORE", "PROVIDER_DAILY_VOLUME"]
 OTHER_NUMERICAL = ["AGE", "LENGTH_OF_STAY_HOURS"]  # PATIENT_INCOME removed - not applicable to unemployed/informal-sector patients
 FEATURE_COLUMNS = COST_FEATURES + RATIO_FEATURE + CONTEXT_FEATURES + OTHER_NUMERICAL + encoded_categoricals
-NOISY_COLUMNS = COST_FEATURES + RATIO_FEATURE + ["COST_RATIO", "PROVIDER_Z_SCORE"]
+RAW_FEATURE_COLUMNS = COST_FEATURES + RATIO_FEATURE + CONTEXT_FEATURES + OTHER_NUMERICAL + categorical_features
 
-X_train = df_model.loc[idx_train, FEATURE_COLUMNS]
-X_val = df_model.loc[idx_val, FEATURE_COLUMNS]
-y_train = y_full.loc[idx_train]
+X_val = onehot_encode(df.loc[idx_val, RAW_FEATURE_COLUMNS], categorical_features, onehot_categories)[FEATURE_COLUMNS]
 y_val = y_full.loc[idx_val]
-
-print("\nApplying SMOTE-ENN + training-time missingness injection (must match training exactly)...")
-smote_enn = SMOTEENN(random_state=RANDOM_STATE)
-X_train_res, y_train_res = smote_enn.fit_resample(X_train, y_train)
-
-rng = np.random.default_rng(RANDOM_STATE)
-X_train_res = X_train_res.reset_index(drop=True)
-for col in NOISY_COLUMNS:
-    mask = rng.random(len(X_train_res)) < MISSING_FRAC
-    X_train_res.loc[mask, col] = np.nan
 
 print("\nLoading the already-trained, already-validated model (not retraining)...")
 model = xgb.XGBClassifier()
@@ -205,7 +216,7 @@ artifacts = {
     "feature_columns": FEATURE_COLUMNS,
     "cost_features": COST_FEATURES,
     "categorical_features": categorical_features,
-    "label_encoders": le_map,  # {col: [class_at_index_0, class_at_index_1, ...]}
+    "onehot_categories": onehot_categories,  # {col: [sorted category values]}
     "group_cols": group_cols,
     "group_median_lookup": group_median_lookup,  # "condition||county" -> median
     "global_median": global_median,
@@ -220,8 +231,8 @@ artifacts = {
     "top_providers": top_providers,
     "conditions": conditions,
     "counties": counties,
-    "encounter_types": le_map["ENCOUNTER_TYPE"],
-    "genders": le_map["GENDER"],
+    "encounter_types": onehot_categories["ENCOUNTER_TYPE"],
+    "genders": onehot_categories["GENDER"],
     "t_high": t_high,
     "t_low": t_low,
     "form_defaults": form_defaults,

@@ -54,10 +54,30 @@ FEATURE_LABELS = {
     "PROVIDER_DAILY_VOLUME": "Provider daily claim volume",
     "AGE": "Patient age",
     "LENGTH_OF_STAY_HOURS": "Length of stay (hours)",
-    "ENCOUNTER_TYPE_ENCODED": "Encounter type",
-    "GENDER_ENCODED": "Gender",
-    "PATIENT_COUNTY_ENCODED": "Patient county",
 }
+# One-hot categorical columns (ENCOUNTER_TYPE_wellness, GENDER_F,
+# PATIENT_COUNTY_Nairobi, ...) aren't individually listed above - there are
+# ~30 of them and they're generated dynamically from the data. Their display
+# prefix is handled by pretty_feature_label() below instead.
+ONEHOT_PREFIX_LABELS = {
+    "ENCOUNTER_TYPE": "Encounter type",
+    "GENDER": "Gender",
+    "PATIENT_COUNTY": "Patient county",
+}
+
+
+def pretty_feature_label(fname: str) -> str:
+    """Human-readable label for a feature column in SHAP output. Checks the
+    static FEATURE_LABELS map first (numeric/engineered features), then
+    falls back to splitting a one-hot column like PATIENT_COUNTY_Nairobi
+    into "Patient county: Nairobi", then falls back to the raw name."""
+    if fname in FEATURE_LABELS:
+        return FEATURE_LABELS[fname]
+    for prefix, label in ONEHOT_PREFIX_LABELS.items():
+        if fname.startswith(prefix + "_"):
+            value = fname[len(prefix) + 1:]
+            return f"{label}: {value}"
+    return fname
 
 st.set_page_config(page_title="Kenya Health Claim Fraud Detection", page_icon="\U0001F6E1️", layout="wide")
 
@@ -403,11 +423,7 @@ def engineer_row(raw: dict, artifacts: dict, conn) -> dict:
     today_count = cur.fetchone()[0]
     daily_volume = baseline + today_count + 1
 
-    def encode(col, value):
-        classes = artifacts["label_encoders"][col]
-        return classes.index(value) if value in classes else 0
-
-    return {
+    feat = {
         "BASE_COST_KES": raw["BASE_COST_KES"],
         "CLAIM_AMOUNT_KES": claim_amount,
         "PAYER_COVERAGE_KES": raw["PAYER_COVERAGE_KES"],
@@ -417,10 +433,26 @@ def engineer_row(raw: dict, artifacts: dict, conn) -> dict:
         "PROVIDER_DAILY_VOLUME": daily_volume,
         "AGE": raw["AGE"],
         "LENGTH_OF_STAY_HOURS": raw["LENGTH_OF_STAY_HOURS"],
-        "ENCOUNTER_TYPE_ENCODED": encode("ENCOUNTER_TYPE", raw["ENCOUNTER_TYPE"]),
-        "GENDER_ENCODED": encode("GENDER", raw["GENDER"]),
-        "PATIENT_COUNTY_ENCODED": encode("PATIENT_COUNTY", county),
     }
+
+    # One-hot encode the three categorical fields exactly the way
+    # export_model_artifacts.py built them (pd.get_dummies, prefix=col) -
+    # every known category gets its own 0/1 column, matching the model's
+    # trained feature set. An unseen value (shouldn't happen - these come
+    # from dropdowns populated from artifacts["onehot_categories"]) just
+    # leaves every dummy column for that field at 0, which XGBoost treats
+    # the same way it treats an all-missing one-hot group.
+    raw_categorical_values = {
+        "ENCOUNTER_TYPE": raw["ENCOUNTER_TYPE"],
+        "GENDER": raw["GENDER"],
+        "PATIENT_COUNTY": county,
+    }
+    for col, categories in artifacts["onehot_categories"].items():
+        value = str(raw_categorical_values[col])
+        for cat in categories:
+            feat[f"{col}_{cat}"] = 1 if value == cat else 0
+
+    return feat
 
 
 def score_row(feat: dict, model, artifacts) -> tuple:
@@ -504,14 +536,6 @@ def login_screen(conn):
                 st.rerun()
             else:
                 st.error("Invalid username or password.")
-        st.info(
-            "Demo accounts: **admin** / **admin123** (admin), "
-            "**auditor1** / **auditor123** (auditor), "
-            "**nurse1** / **nurse123** (nurse). "
-            "Role is set per account (see Manage users), not chosen at login - "
-            "that's deliberate, letting someone pick their own access level at "
-            "sign-in would defeat the point of having roles on a fraud system."
-        )
         st.caption("Forgot password? Contact your System Admin.")
 
 
@@ -908,7 +932,7 @@ def claim_detail_page(conn, model, artifacts, claim_id):
                     zip(artifacts["feature_columns"], sv), key=lambda t: abs(t[1]), reverse=True
                 )[:3]
                 for fname, val in contrib:
-                    fname_label = FEATURE_LABELS.get(fname, fname)
+                    fname_label = pretty_feature_label(fname)
                     direction = "increases" if val > 0 else "decreases"
                     st.write(f"- **{fname_label}** ({feat[fname]:.2f}) {direction} the fraud score ({val:+.3f})")
             except Exception as e:
