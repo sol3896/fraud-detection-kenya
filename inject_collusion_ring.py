@@ -38,7 +38,18 @@ import numpy as np
 
 RANDOM_STATE = 42
 N_RING_PROVIDERS = 12
-N_RING_PATIENTS = 60
+N_RING_PATIENTS = 300  # was 60 - degree_only_baseline.py proved 60 was a leak:
+# 137014 ring claims / 60 patients = ~2283 appearances each in the full
+# dataset, versus a real patient's max of 980 (99th pct 573) - a trivial,
+# fully-separable "patient claim count" rule (no graph needed at all) was
+# getting 100% recall on collusion_ring by itself. At 300 ring patients,
+# average appearances (~457) falls inside the normal patient distribution's
+# 75th-99th percentile band (57-573), so ring patients overlap with
+# genuinely heavy real patients instead of forming an obvious outlier
+# cluster, while the (provider, patient) pair density (~38 claims/pair at
+# 12 providers x 300 patients) stays well above the ~16 baseline mean
+# elsewhere in the dataset - the relational signal GraphSAGE is meant to
+# use is preserved, just no longer a free univariate tell.
 COLLUSION_RATE = 0.04  # fraction of TOTAL rows converted to collusion_ring fraud
 MIN_PROVIDER_VOLUME = 50  # only pick "real" providers with enough existing claims
 
