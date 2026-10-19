@@ -24,6 +24,7 @@ import os
 import json
 import sqlite3
 import hashlib
+import secrets
 import datetime as dt
 
 import numpy as np
@@ -42,7 +43,7 @@ MODEL_PATH = f"{BASE_DIR}/output/model/xgboost_fraud_model_v2_robust.json"
 ARTIFACTS_PATH = f"{BASE_DIR}/output/model/dashboard_artifacts.json"
 DB_PATH = f"{BASE_DIR}/output/model/claims_dashboard_v2.db"
 
-ROLES = ["nurse", "auditor", "admin"]
+ROLES = ["nurse", "provider", "auditor", "admin"]
 
 FEATURE_LABELS = {
     "BASE_COST_KES": "Base cost (KES)",
@@ -54,6 +55,8 @@ FEATURE_LABELS = {
     "PROVIDER_DAILY_VOLUME": "Provider daily claim volume",
     "AGE": "Patient age",
     "LENGTH_OF_STAY_HOURS": "Length of stay (hours)",
+    "GEOGRAPHIC_MISMATCH": "Geographic mismatch (facility outside patient's county)",
+    "CLINICAL_INCONSISTENCY": "Clinical inconsistency (condition/gender mismatch)",
 }
 # One-hot categorical columns (ENCOUNTER_TYPE_wellness, GENDER_F,
 # PATIENT_COUNTY_Nairobi, ...) aren't individually listed above - there are
@@ -128,9 +131,15 @@ def inject_theme(dark: bool = False):
         h1, h2, h3 {{ color: {c['heading']}; font-weight: 700; }}
         p, span, label, .stMarkdown, .stCaption {{ color: {c['text']}; }}
 
-        /* Page background */
-        [data-testid="stAppViewContainer"] {{
-            background-color: {c['bg']};
+        /* Page background - targets stApp/stAppViewContainer AND the newer
+           stMain/stMainBlockContainer wrappers Streamlit added in later
+           versions, so the canvas paints correctly across versions instead
+           of leaving a white/gray panel behind inputs and tables. */
+        .stApp,
+        [data-testid="stAppViewContainer"],
+        [data-testid="stMain"],
+        [data-testid="stMainBlockContainer"] {{
+            background-color: {c['bg']} !important;
         }}
 
         /* Streamlit's own top toolbar - unstyled by default, so it was
@@ -175,6 +184,10 @@ def inject_theme(dark: bool = False):
         [data-baseweb="select"] * {{ color: {c['text']} !important; }}
         [data-baseweb="popover"] {{ background-color: {c['input_bg']} !important; }}
         [data-baseweb="popover"] * {{ color: {c['text']} !important; }}
+        /* Dropdown option list - rendered in its own portal, not always a
+           descendant of the popover div above. */
+        [data-baseweb="menu"] {{ background-color: {c['card']} !important; }}
+        [data-baseweb="menu"] li, [data-baseweb="menu"] * {{ color: {c['text']} !important; }}
 
         /* Sidebar */
         [data-testid="stSidebar"] {{
@@ -221,12 +234,18 @@ def inject_theme(dark: bool = False):
            to the accent color so they switch with the toggle. Without this
            they'd fall back to config.toml's static primaryColor, which never
            changes for dark mode. */
-        .stButton button[kind="primary"], [data-testid="stFormSubmitButton"] button[kind="primary"] {{
+        .stButton button[kind="primary"],
+        .stButton [data-testid="baseButton-primary"],
+        [data-testid="stFormSubmitButton"] button[kind="primary"],
+        [data-testid="stFormSubmitButton"] [data-testid="baseButton-primary"] {{
             background-color: {c['accent']} !important;
             border-color: {c['accent']} !important;
             color: {'#0B132B' if dark else '#FFFFFF'} !important;
         }}
-        .stButton button[kind="primary"]:hover, [data-testid="stFormSubmitButton"] button[kind="primary"]:hover {{
+        .stButton button[kind="primary"]:hover,
+        .stButton [data-testid="baseButton-primary"]:hover,
+        [data-testid="stFormSubmitButton"] button[kind="primary"]:hover,
+        [data-testid="stFormSubmitButton"] [data-testid="baseButton-primary"]:hover {{
             filter: brightness(1.1);
         }}
         /* Links and other accent-colored text */
@@ -310,6 +329,7 @@ def get_db():
         CREATE TABLE IF NOT EXISTS users (
             username TEXT PRIMARY KEY,
             password_hash TEXT NOT NULL,
+            salt TEXT,
             role TEXT NOT NULL DEFAULT 'nurse'
         )
     """)
@@ -319,6 +339,7 @@ def get_db():
             first_name TEXT,
             last_name TEXT,
             gender TEXT,
+            dob TEXT,
             age INTEGER,
             county TEXT,
             registered_by TEXT,
@@ -338,6 +359,8 @@ def get_db():
             gender TEXT,
             county TEXT,
             service_date TEXT,
+            admission_datetime TEXT,
+            discharge_datetime TEXT,
             age REAL,
             length_of_stay_hours REAL,
             base_cost_kes REAL,
@@ -362,6 +385,35 @@ def get_db():
         conn.execute("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'nurse'")
         conn.execute("UPDATE users SET role = 'admin' WHERE username = 'admin'")
         conn.commit()
+    if "salt" not in users_cols:
+        # Existing rows get salt = NULL, meaning "still the old unsalted
+        # SHA-256 hash" - login() below verifies those the old way once,
+        # then transparently re-hashes with a fresh salt on that successful
+        # login, so no one's password needs to be reset for this upgrade.
+        conn.execute("ALTER TABLE users ADD COLUMN salt TEXT")
+        conn.commit()
+
+    # One-time migration: the role previously called "auditor" actually did
+    # claim submission (the real mix-up a role review caught - in a real
+    # claims system, submission and review have to be different people/
+    # accounts). Any account that already has that old role was functionally
+    # a submitter, so it becomes "provider" here; "auditor" from this point
+    # on means review-only, with no submission access. PRAGMA user_version
+    # makes this run exactly once, so an auditor account created normally
+    # afterwards (via Manage users) is never touched by it.
+    if conn.execute("PRAGMA user_version").fetchone()[0] < 1:
+        conn.execute("UPDATE users SET role = 'provider' WHERE role = 'auditor'")
+        conn.execute("PRAGMA user_version = 1")
+        conn.commit()
+
+    patients_cols = {row[1] for row in conn.execute("PRAGMA table_info(patients)").fetchall()}
+    if "dob" not in patients_cols:
+        # Existing patients keep their stored (static) age - there's no way
+        # to back out a date of birth from a stored age alone. New
+        # registrations from here on capture dob and compute age from it
+        # automatically instead of asking for age directly.
+        conn.execute("ALTER TABLE patients ADD COLUMN dob TEXT")
+        conn.commit()
 
     claims_cols = {row[1] for row in conn.execute("PRAGMA table_info(claims_log)").fetchall()}
     for col, ddl in [
@@ -370,6 +422,13 @@ def get_db():
         ("reviewed_at", "ALTER TABLE claims_log ADD COLUMN reviewed_at TEXT"),
         ("patient_id", "ALTER TABLE claims_log ADD COLUMN patient_id TEXT"),
         ("override_reason", "ALTER TABLE claims_log ADD COLUMN override_reason TEXT"),
+        # Full admission/discharge timestamps for inpatient claims - NULL
+        # for non-inpatient encounters (service_date alone is enough there).
+        # length_of_stay_hours is still the feature the model actually uses;
+        # these two are the real source it's now computed from for inpatient
+        # claims, instead of being typed in as a free-floating number.
+        ("admission_datetime", "ALTER TABLE claims_log ADD COLUMN admission_datetime TEXT"),
+        ("discharge_datetime", "ALTER TABLE claims_log ADD COLUMN discharge_datetime TEXT"),
     ]:
         if col not in claims_cols:
             conn.execute(ddl)
@@ -380,21 +439,57 @@ def get_db():
     # subset of admin).
     cur = conn.execute("SELECT COUNT(*) FROM users")
     if cur.fetchone()[0] == 0:
+        admin_hash, admin_salt = hash_password("admin123")
         conn.execute(
-            "INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)",
-            ("admin", hash_password("admin123"), "admin"),
+            "INSERT INTO users (username, password_hash, salt, role) VALUES (?, ?, ?, ?)",
+            ("admin", admin_hash, admin_salt, "admin"),
         )
         conn.commit()
     return conn
 
 
-def hash_password(pw: str) -> str:
-    return hashlib.sha256(pw.encode()).hexdigest()
+def hash_password(pw: str, salt: str | None = None) -> tuple[str, str]:
+    """PBKDF2-HMAC-SHA256 with a random per-user salt (200,000 iterations -
+    OWASP's current minimum recommendation for PBKDF2-SHA256). Replaces the
+    earlier plain hashlib.sha256(pw) scheme, which had no salt (identical
+    passwords produced identical hashes) and was fast enough to be
+    brute-forced cheaply if the DB file ever leaked. Returns (hash, salt) -
+    pass an existing salt back in to verify a login; omit it to generate a
+    fresh one for a new/changed password."""
+    if salt is None:
+        salt = secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac("sha256", pw.encode(), salt.encode(), 200_000).hex()
+    return digest, salt
+
+
+def verify_password(pw: str, stored_hash: str, salt: str | None) -> bool:
+    """True if pw matches stored_hash. Handles both the new salted scheme
+    (salt is set) and the legacy unsalted SHA-256 scheme (salt is NULL, from
+    before this migration) so existing accounts keep working unchanged."""
+    if salt:
+        check, _ = hash_password(pw, salt)
+        return check == stored_hash
+    return hashlib.sha256(pw.encode()).hexdigest() == stored_hash
+
+
+def calculate_age(dob: dt.date, as_of: dt.date | None = None) -> int:
+    """Whole years between a date of birth and `as_of` (defaults to today).
+    Standard "has this year's birthday happened yet" subtraction, not just
+    year difference - avoids being off by one for anyone whose birthday
+    hasn't happened yet this year."""
+    as_of = as_of or dt.date.today()
+    years = as_of.year - dob.year
+    if (as_of.month, as_of.day) < (dob.month, dob.day):
+        years -= 1
+    return max(years, 0)
 
 
 # ============================================================
 # FEATURE ENGINEERING (mirrors export_model_artifacts.py exactly)
 # ============================================================
+MATERNITY_CONDITIONS = {"Pregnant (finding)", "Pre-eclampsia (disorder)"}
+
+
 def engineer_row(raw: dict, artifacts: dict, conn) -> dict:
     """raw has the RAW claim fields; returns the full FEATURE_COLUMNS dict."""
     provider_id = str(raw["PROVIDER_ID"])
@@ -402,6 +497,7 @@ def engineer_row(raw: dict, artifacts: dict, conn) -> dict:
     county = raw["PATIENT_COUNTY"]
     claim_amount = raw["CLAIM_AMOUNT_KES"]
     service_date = str(raw["SERVICE_DATE"])
+    gender = raw["GENDER"]
 
     # COST_RATIO
     key = f"{condition}||{county}"
@@ -423,6 +519,15 @@ def engineer_row(raw: dict, artifacts: dict, conn) -> dict:
     today_count = cur.fetchone()[0]
     daily_volume = baseline + today_count + 1
 
+    # GEOGRAPHIC_MISMATCH: does this provider's facility county differ from
+    # the patient's own registered county? (location-anomaly signal)
+    provider_county = artifacts.get("provider_county_lookup", {}).get(provider_id)
+    geographic_mismatch = int(provider_county is not None and provider_county != county)
+
+    # CLINICAL_INCONSISTENCY: a maternity condition on a male patient
+    # (clinical-inconsistency signal)
+    clinical_inconsistency = int(str(gender) == "M" and condition in MATERNITY_CONDITIONS)
+
     feat = {
         "BASE_COST_KES": raw["BASE_COST_KES"],
         "CLAIM_AMOUNT_KES": claim_amount,
@@ -433,6 +538,8 @@ def engineer_row(raw: dict, artifacts: dict, conn) -> dict:
         "PROVIDER_DAILY_VOLUME": daily_volume,
         "AGE": raw["AGE"],
         "LENGTH_OF_STAY_HOURS": raw["LENGTH_OF_STAY_HOURS"],
+        "GEOGRAPHIC_MISMATCH": geographic_mismatch,
+        "CLINICAL_INCONSISTENCY": clinical_inconsistency,
     }
 
     # One-hot encode the three categorical fields exactly the way
@@ -480,14 +587,16 @@ def log_claim(conn, raw, source, username, score, label):
         INSERT INTO claims_log (
             submitted_at, submitted_by, source, patient_id, provider_id,
             primary_condition, encounter_type, gender, county, service_date,
+            admission_datetime, discharge_datetime,
             age, length_of_stay_hours, base_cost_kes, claim_amount_kes,
             payer_coverage_kes, claim_to_base_ratio, fraud_score, risk_label,
             review_status
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     """, (
         dt.datetime.now().isoformat(timespec="seconds"), username, source,
         raw.get("PATIENT_ID"), str(raw["PROVIDER_ID"]), raw["PRIMARY_CONDITION"],
         raw["ENCOUNTER_TYPE"], raw["GENDER"], raw["PATIENT_COUNTY"], str(raw["SERVICE_DATE"]),
+        raw.get("ADMISSION_DATETIME"), raw.get("DISCHARGE_DATETIME"),
         raw["AGE"], raw["LENGTH_OF_STAY_HOURS"],
         raw["BASE_COST_KES"], raw["CLAIM_AMOUNT_KES"], raw["PAYER_COVERAGE_KES"],
         raw["CLAIM_TO_BASE_RATIO"], score, label, "pending",
@@ -527,12 +636,22 @@ def login_screen(conn):
             password = st.text_input("Password", type="password")
             submitted = st.form_submit_button("Log in", type="primary", use_container_width=True)
         if submitted:
-            cur = conn.execute("SELECT password_hash, role FROM users WHERE username = ?", (username,))
+            cur = conn.execute("SELECT password_hash, salt, role FROM users WHERE username = ?", (username,))
             row = cur.fetchone()
-            if row and row[0] == hash_password(password):
+            if row and verify_password(password, row[0], row[1]):
+                if row[1] is None:
+                    # Legacy unsalted account that just verified correctly -
+                    # transparently upgrade it to a salted hash now that we
+                    # have the plaintext password in hand.
+                    new_hash, new_salt = hash_password(password)
+                    conn.execute(
+                        "UPDATE users SET password_hash = ?, salt = ? WHERE username = ?",
+                        (new_hash, new_salt, username),
+                    )
+                    conn.commit()
                 st.session_state.logged_in = True
                 st.session_state.username = username
-                st.session_state.role = row[1]
+                st.session_state.role = row[2]
                 st.rerun()
             else:
                 st.error("Invalid username or password.")
@@ -551,38 +670,57 @@ def register_patient_page(conn, artifacts):
             gender = st.selectbox("Gender", artifacts.get("genders", ["Female", "Male"]))
         with c2:
             last_name = st.text_input("Last name")
-            age = st.number_input("Age", min_value=0, max_value=120, value=30)
+            dob = st.date_input(
+                "Date of birth", value=dt.date(1996, 1, 1),
+                min_value=dt.date(1900, 1, 1), max_value=dt.date.today(),
+            )
         county = st.selectbox("County", artifacts["counties"])
         submitted = st.form_submit_button("Register patient", type="primary")
 
     if submitted:
         if not first_name.strip() or not last_name.strip():
             st.error("First and last name are both required.")
+        elif dob > dt.date.today():
+            st.error("Date of birth can't be in the future.")
         else:
+            age = calculate_age(dob)
             count = conn.execute("SELECT COUNT(*) FROM patients").fetchone()[0]
             patient_id = f"P-{88200 + count + 1}"
             conn.execute(
-                "INSERT INTO patients (patient_id, first_name, last_name, gender, age, county, "
-                "registered_by, registered_at) VALUES (?,?,?,?,?,?,?,?)",
-                (patient_id, first_name.strip(), last_name.strip(), gender, age, county,
+                "INSERT INTO patients (patient_id, first_name, last_name, gender, dob, age, county, "
+                "registered_by, registered_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                (patient_id, first_name.strip(), last_name.strip(), gender, dob.isoformat(), age, county,
                  st.session_state.username, dt.datetime.now().isoformat(timespec="seconds")),
             )
             conn.commit()
             st.success("✓ Patient registered successfully")
-            st.info(f"Patient ID: **{patient_id}**  —  hand this to the patient / use it when submitting their claims")
+            st.info(f"Patient ID: **{patient_id}**  ·  age **{age}** (calculated from date of birth)  "
+                    "—  hand this to the patient / use it when submitting their claims")
 
     st.divider()
     st.subheader("Recently registered")
     df = pd.read_sql_query(
         "SELECT patient_id AS \"Patient ID\", first_name || ' ' || last_name AS Name, "
-        "gender AS Gender, age AS Age, county AS County FROM patients "
-        "ORDER BY registered_at DESC LIMIT 20",
+        "gender AS Gender, dob AS dob_raw, age AS age_fallback, "
+        "county AS County FROM patients ORDER BY registered_at DESC LIMIT 20",
         conn,
     )
     if df.empty:
         st.caption("No patients registered yet.")
     else:
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        # Live age, recomputed from date of birth on every page load (not
+        # the static value stored at registration time) - patients registered
+        # before this column existed have no dob on file, so they fall back
+        # to their stored (static) age instead.
+        def _live_age(row):
+            if row["dob_raw"]:
+                return calculate_age(dt.date.fromisoformat(row["dob_raw"]))
+            return row["age_fallback"]
+
+        df["Age"] = df.apply(_live_age, axis=1)
+        df["Date of birth"] = df["dob_raw"].fillna("— not on file —")
+        display_cols = ["Patient ID", "Name", "Gender", "Date of birth", "Age", "County"]
+        st.dataframe(df[display_cols], use_container_width=True, hide_index=True)
 
 
 # ============================================================
@@ -593,28 +731,51 @@ def submit_claim_page(conn, model, artifacts):
     fd = artifacts["form_defaults"]
 
     patients_df = pd.read_sql_query(
-        "SELECT patient_id, first_name, last_name FROM patients ORDER BY registered_at DESC LIMIT 300",
+        "SELECT patient_id, first_name, last_name, dob, age FROM patients "
+        "ORDER BY registered_at DESC LIMIT 300",
         conn,
     )
+
+    # Patient selection lives OUTSIDE the form below, not by accident -
+    # widgets inside st.form() only report their value on submit, so an
+    # auto-filled age tied to patient selection has to react immediately,
+    # before the form is submitted.
+    if patients_df.empty:
+        st.caption("No patients registered yet - register one on the Register patient "
+                   "page first if you want to link this claim to a patient (optional).")
+        patient_id = None
+    else:
+        patient_options = [None] + patients_df["patient_id"].tolist()
+
+        def _patient_label(pid):
+            if pid is None:
+                return "— no patient linked (walk-in / not yet registered) —"
+            r = patients_df[patients_df["patient_id"] == pid].iloc[0]
+            return f"{pid} — {r['first_name']} {r['last_name']}"
+
+        patient_id = st.selectbox("Patient", patient_options, format_func=_patient_label)
+
+    # Auto-calculated from the linked patient's date of birth, not typed in -
+    # falls back to a manual field only for a walk-in with no patient record,
+    # or a legacy patient registered before dob was captured.
+    linked_age = None
+    if patient_id is not None:
+        p = patients_df[patients_df["patient_id"] == patient_id].iloc[0]
+        if p["dob"]:
+            linked_age = calculate_age(dt.date.fromisoformat(p["dob"]))
+        else:
+            linked_age = int(p["age"]) if p["age"] is not None else None
+
+    # Encounter type also lives outside the form - whether this is an
+    # inpatient claim decides which fields render below (admission/discharge
+    # date+time vs. a single length-of-stay number), and that choice has to
+    # take effect immediately, same reason patient selection is out here.
+    encounter_type = st.selectbox("Encounter type", artifacts["encounter_types"])
+    is_inpatient = encounter_type == "inpatient"
 
     with st.form("claim_form"):
         col1, col2, col3 = st.columns(3)
         with col1:
-            if patients_df.empty:
-                st.caption("No patients registered yet - register one on the Register patient "
-                           "page first if you want to link this claim to a patient (optional).")
-                patient_id = None
-            else:
-                patient_options = [None] + patients_df["patient_id"].tolist()
-
-                def _patient_label(pid):
-                    if pid is None:
-                        return "— no patient linked (walk-in / not yet registered) —"
-                    r = patients_df[patients_df["patient_id"] == pid].iloc[0]
-                    return f"{pid} — {r['first_name']} {r['last_name']}"
-
-                patient_id = st.selectbox("Patient", patient_options, format_func=_patient_label)
-
             org_names = artifacts.get("organization_names", {})
             org_lookup = artifacts["provider_org_lookup"]
 
@@ -631,12 +792,39 @@ def submit_claim_page(conn, model, artifacts):
             st.caption(f"Facility: {org_name}")
             condition = st.selectbox("Primary condition", artifacts["conditions"])
             county = st.selectbox("Patient county", artifacts["counties"])
-            encounter_type = st.selectbox("Encounter type", artifacts["encounter_types"])
             gender = st.selectbox("Gender", artifacts["genders"])
         with col2:
-            service_date = st.date_input("Service date", value=dt.date.today())
-            age = st.number_input("Patient age", min_value=0, max_value=120, value=int(fd["AGE"]["median"]))
-            length_of_stay = st.number_input("Length of stay (hours)", min_value=0.0, value=round(fd["LENGTH_OF_STAY_HOURS"]["median"], 2))
+            admission_dt = discharge_dt = None
+            if is_inpatient:
+                st.caption("Inpatient - admission and discharge date/time (length of stay "
+                           "is calculated from these, not entered directly).")
+                ac1, ac2 = st.columns(2)
+                admission_date = ac1.date_input("Admission date", value=dt.date.today())
+                admission_time = ac2.time_input("Admission time", value=dt.time(9, 0))
+                dc1, dc2 = st.columns(2)
+                discharge_date = dc1.date_input("Discharge date", value=dt.date.today())
+                discharge_time = dc2.time_input("Discharge time", value=dt.time(9, 0))
+                admission_dt = dt.datetime.combine(admission_date, admission_time)
+                discharge_dt = dt.datetime.combine(discharge_date, discharge_time)
+                service_date = admission_date
+                length_of_stay = max((discharge_dt - admission_dt).total_seconds() / 3600, 0.0)
+                st.metric("Length of stay (hours)", round(length_of_stay, 1))
+            else:
+                service_date = st.date_input("Service date", value=dt.date.today())
+                length_of_stay = st.number_input(
+                    "Length of stay (hours)", min_value=0.0,
+                    value=round(fd["LENGTH_OF_STAY_HOURS"]["median"], 2),
+                )
+            if linked_age is not None:
+                st.metric("Patient age", linked_age)
+                st.caption("Calculated from the linked patient's date of birth.")
+                age = linked_age
+            else:
+                age = st.number_input(
+                    "Patient age", min_value=0, max_value=120, value=int(fd["AGE"]["median"]),
+                    help="No date of birth on file for this patient (walk-in, or registered "
+                         "before date-of-birth capture) - enter age manually.",
+                )
         with col3:
             base_cost = st.number_input("Base cost (KES)", min_value=0.0, value=round(fd["BASE_COST_KES"]["median"], 2))
             claim_amount = st.number_input("Claim amount (KES)", min_value=0.0, value=round(fd["CLAIM_AMOUNT_KES"]["median"], 2))
@@ -646,7 +834,9 @@ def submit_claim_page(conn, model, artifacts):
 
         submitted = st.form_submit_button("Score this claim", type="primary")
 
-    if submitted:
+    if submitted and is_inpatient and discharge_dt < admission_dt:
+        st.error("Discharge date/time can't be before admission date/time.")
+    elif submitted:
         raw = {
             "PATIENT_ID": patient_id, "PROVIDER_ID": provider_id, "PRIMARY_CONDITION": condition,
             "PATIENT_COUNTY": county, "ENCOUNTER_TYPE": encounter_type, "GENDER": gender,
@@ -654,6 +844,8 @@ def submit_claim_page(conn, model, artifacts):
             "LENGTH_OF_STAY_HOURS": length_of_stay, "BASE_COST_KES": base_cost,
             "CLAIM_AMOUNT_KES": claim_amount, "PAYER_COVERAGE_KES": payer_coverage,
             "CLAIM_TO_BASE_RATIO": claim_to_base_ratio,
+            "ADMISSION_DATETIME": admission_dt.isoformat() if admission_dt else None,
+            "DISCHARGE_DATETIME": discharge_dt.isoformat() if discharge_dt else None,
         }
         feat = engineer_row(raw, artifacts, conn)
         score, label = score_row(feat, model, artifacts)
@@ -832,17 +1024,22 @@ def claims_dashboard_page(conn, artifacts):
 
 
 # ============================================================
-# CLAIM DETAIL - SCORING & DECISION (auditor / admin)
+# CLAIM DETAIL - SCORING & DECISION
 # Opened by clicking a row in the Claims dashboard. Matches wireframe 4.
+# The score/SHAP explanation are visible to both provider and auditor (a
+# provider can see why their own submission was flagged); the actual
+# approve/reject/escalate decision is auditor-only, enforced below by
+# `role`, not just by hiding the nav entry.
 # ============================================================
-def claim_detail_page(conn, model, artifacts, claim_id):
+def claim_detail_page(conn, model, artifacts, claim_id, role):
     if st.button("← Back to Claims dashboard"):
         st.session_state.selected_claim_id = None
         st.rerun()
 
     row = conn.execute(
         "SELECT id, submitted_at, submitted_by, source, patient_id, provider_id, primary_condition, "
-        "encounter_type, gender, county, service_date, age, length_of_stay_hours, base_cost_kes, "
+        "encounter_type, gender, county, service_date, admission_datetime, discharge_datetime, "
+        "age, length_of_stay_hours, base_cost_kes, "
         "claim_amount_kes, payer_coverage_kes, claim_to_base_ratio, fraud_score, risk_label, "
         "review_status, reviewed_by, reviewed_at, override_reason FROM claims_log WHERE id = ?",
         (claim_id,),
@@ -852,7 +1049,8 @@ def claim_detail_page(conn, model, artifacts, claim_id):
         return
 
     (cid, submitted_at, submitted_by, source, patient_id, provider_id, condition, encounter_type,
-     gender, county, service_date, age, los, base_cost, claim_amount, payer_coverage,
+     gender, county, service_date, admission_datetime, discharge_datetime, age, los, base_cost,
+     claim_amount, payer_coverage,
      ratio, score, label, review_status, reviewed_by, reviewed_at, override_reason) = row
 
     st.header(f"Claim #{cid}")
@@ -882,6 +1080,9 @@ def claim_detail_page(conn, model, artifacts, claim_id):
         st.write(f"**Gender:** {gender}")
         st.write(f"**County:** {county}")
         st.write(f"**Patient age (at claim):** {age:.0f}")
+        if admission_datetime and discharge_datetime:
+            st.write(f"**Admission:** {admission_datetime}")
+            st.write(f"**Discharge:** {discharge_datetime}")
         st.write(f"**Length of stay:** {los:.1f} hours")
         st.write(f"**Base cost (SHA tariff):** KES {base_cost:,.0f}")
         st.write(f"**Claim amount:** KES {claim_amount:,.0f}")
@@ -946,6 +1147,18 @@ def claim_detail_page(conn, model, artifacts, claim_id):
             note += f"  ·  override reason: {override_reason}"
         st.info(note)
 
+    if role != "auditor":
+        # Providers can see the score, explanation, and the review status
+        # above, but cannot act on it - only an independent auditor account
+        # can approve/reject/escalate a claim. This is enforced here, not
+        # just by hiding "Submit claim"/"Audit history" from the provider
+        # nav, so a provider can't reach this control by any other path.
+        st.caption(
+            "Only an auditor account can approve, reject, or escalate a claim - "
+            "providers can view the outcome here once an auditor has reviewed it."
+        )
+        return
+
     override = st.checkbox("Override model verdict")
     reason = st.text_input("Override reason (required if overriding)") if override else ""
 
@@ -977,7 +1190,7 @@ def claim_detail_page(conn, model, artifacts, claim_id):
 
 
 # ============================================================
-# FRAUD ANALYTICS OVERVIEW (auditor / admin)
+# FRAUD ANALYTICS OVERVIEW (auditor)
 # ============================================================
 def analytics_page(conn):
     st.header("Fraud analytics overview")
@@ -1076,10 +1289,14 @@ def manage_users_page(conn):
     st.header("Manage users")
     st.caption("New accounts are saved to the users table in the SQLite database and "
                "can log in immediately. Role controls which pages an account can see: "
-               "nurse -> register patients only; auditor -> submit/upload claims, "
-               "claims dashboard, audit history, analytics, provider profiles. "
-               "Admin is scoped strictly to provisioning accounts (this page only) - "
-               "it is not a superset with access to claims or clinical data.")
+               "nurse -> register patients only; provider -> submit/upload claims, "
+               "claims dashboard, provider profile (this is the hospital/facility "
+               "staff who generate a claim); auditor -> review claims (approve/"
+               "reject/escalate), audit history, analytics, provider profiles - "
+               "review-only, no submission access, so the same account can't both "
+               "submit and approve a claim. Admin is scoped strictly to provisioning "
+               "accounts (this page only) - it is not a superset with access to "
+               "claims or clinical data.")
 
     with st.form("add_user_form", clear_on_submit=True):
         new_username = st.text_input("New username")
@@ -1100,9 +1317,10 @@ def manage_users_page(conn):
             if existing:
                 st.error(f"Username '{new_username}' already exists.")
             else:
+                new_hash, new_salt = hash_password(new_password)
                 conn.execute(
-                    "INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)",
-                    (new_username, hash_password(new_password), new_role),
+                    "INSERT INTO users (username, password_hash, salt, role) VALUES (?, ?, ?, ?)",
+                    (new_username, new_hash, new_salt, new_role),
                 )
                 conn.commit()
                 st.success(f"User '{new_username}' created with role '{new_role}'. They can log in now.")
@@ -1178,11 +1396,17 @@ def main():
     nav_options = []
     if role == "nurse":
         nav_options += ["Register patient"]
+    if role == "provider":
+        # Provider = hospital/facility staff who generate and submit claims.
+        # They can see their own submissions' status in Claims dashboard, but
+        # claim_detail_page below hides the approve/reject/escalate controls
+        # unless the viewer is an auditor - providers can't review their own
+        # submissions, only auditors can.
+        nav_options += ["Submit claim", "Upload CSV", "Claims dashboard", "Provider profile"]
     if role == "auditor":
-        nav_options += [
-            "Submit claim", "Upload CSV", "Claims dashboard", "Audit history",
-            "Analytics", "Provider profile",
-        ]
+        # Auditor = independent reviewer. No submission access - review-only,
+        # by design, so the same account can't both submit and approve a claim.
+        nav_options += ["Claims dashboard", "Audit history", "Analytics", "Provider profile"]
     if role == "admin":
         # Admin is scoped strictly to account provisioning - no claims access,
         # no clinical/audit pages. It is not a superset of nurse/auditor.
@@ -1204,7 +1428,7 @@ def main():
         upload_csv_page(conn, model, artifacts)
     elif page == "Claims dashboard":
         if st.session_state.get("selected_claim_id"):
-            claim_detail_page(conn, model, artifacts, st.session_state.selected_claim_id)
+            claim_detail_page(conn, model, artifacts, st.session_state.selected_claim_id, role)
         else:
             claims_dashboard_page(conn, artifacts)
     elif page == "Audit history":

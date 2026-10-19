@@ -84,10 +84,22 @@ global_median = train_df["CLAIM_AMOUNT_KES"].median()
 median_lookup = df[group_cols].apply(tuple, axis=1).map(group_median).fillna(global_median)
 df["COST_RATIO"] = (df["CLAIM_AMOUNT_KES"] / median_lookup.replace(0, np.nan)).fillna(1.0)
 
-provider_mean = train_df.groupby("PROVIDER_ID")["CLAIM_AMOUNT_KES"].mean()
-provider_std = train_df.groupby("PROVIDER_ID")["CLAIM_AMOUNT_KES"].std()
-global_mean = train_df["CLAIM_AMOUNT_KES"].mean()
-global_std = train_df["CLAIM_AMOUNT_KES"].std()
+# PROVIDER_Z_SCORE baseline is fit on this provider's TRAIN-LABELED-
+# LEGITIMATE claims only (never known fraud rows) - the acid-test SHAP
+# ablation (collusion_shap_plot.py) proved this feature was the dominant
+# proxy XGBoost used to catch collusion_ring (26.3% of SHAP weight on
+# those rows alone), because ring providers' aggregate mean/std was being
+# fit on a population where ring fraud claims vastly outnumbered their
+# real legitimate history - so the "baseline" a ring claim was compared
+# against was mostly other ring claims, not genuine normal behaviour.
+# Fitting only on legit rows matches realistic deployment too: a real
+# system builds a provider's cost profile from its established clean
+# history, not by blending in claims already known to be fraudulent.
+train_legit_df = train_df[train_df["IS_FRAUD"] == 0]
+provider_mean = train_legit_df.groupby("PROVIDER_ID")["CLAIM_AMOUNT_KES"].mean()
+provider_std = train_legit_df.groupby("PROVIDER_ID")["CLAIM_AMOUNT_KES"].std()
+global_mean = train_legit_df["CLAIM_AMOUNT_KES"].mean()
+global_std = train_legit_df["CLAIM_AMOUNT_KES"].std()
 mean_lookup = df["PROVIDER_ID"].map(provider_mean).fillna(global_mean)
 std_lookup = df["PROVIDER_ID"].map(provider_std).fillna(global_std).replace(0, global_std)
 df["PROVIDER_Z_SCORE"] = ((df["CLAIM_AMOUNT_KES"] - mean_lookup) / std_lookup).fillna(0.0)
@@ -99,8 +111,9 @@ COST_FEATURES = ["BASE_COST_KES", "CLAIM_AMOUNT_KES", "PAYER_COVERAGE_KES"]
 RATIO_FEATURE = ["CLAIM_TO_BASE_RATIO"]
 CONTEXT_FEATURES = ["COST_RATIO", "PROVIDER_Z_SCORE", "PROVIDER_DAILY_VOLUME"]
 OTHER_NUMERICAL = ["AGE", "LENGTH_OF_STAY_HOURS"]  # PATIENT_INCOME removed - not applicable to unemployed/informal-sector patients
-FEATURE_COLUMNS = COST_FEATURES + RATIO_FEATURE + CONTEXT_FEATURES + OTHER_NUMERICAL + encoded_categoricals
-RAW_FEATURE_COLUMNS = COST_FEATURES + RATIO_FEATURE + CONTEXT_FEATURES + OTHER_NUMERICAL + categorical_features
+ANOMALY_FEATURES = ["GEOGRAPHIC_MISMATCH", "CLINICAL_INCONSISTENCY"]
+FEATURE_COLUMNS = COST_FEATURES + RATIO_FEATURE + CONTEXT_FEATURES + OTHER_NUMERICAL + ANOMALY_FEATURES + encoded_categoricals
+RAW_FEATURE_COLUMNS = COST_FEATURES + RATIO_FEATURE + CONTEXT_FEATURES + OTHER_NUMERICAL + ANOMALY_FEATURES + categorical_features
 
 X_test = onehot_encode(df.loc[idx_test, RAW_FEATURE_COLUMNS], categorical_features, onehot_categories)[FEATURE_COLUMNS]
 y_test = y_full.loc[idx_test]
@@ -126,7 +139,7 @@ importance_df = pd.DataFrame({
     "mean_abs_shap": mean_abs_shap,
 }).sort_values("mean_abs_shap", ascending=False).reset_index(drop=True)
 importance_df["rank"] = importance_df.index + 1
-importance_df["is_contextual_feature"] = importance_df["feature"].isin(CONTEXT_FEATURES)
+importance_df["is_contextual_feature"] = importance_df["feature"].isin(CONTEXT_FEATURES + ANOMALY_FEATURES)
 
 total_shap = importance_df["mean_abs_shap"].sum()
 importance_df["pct_of_total"] = importance_df["mean_abs_shap"] / total_shap * 100
@@ -150,9 +163,13 @@ print(agg_df.to_string(index=False))
 
 context_total_pct = importance_df.loc[importance_df["is_contextual_feature"], "pct_of_total"].sum()
 raw_cost_total_pct = importance_df.loc[importance_df["feature"].isin(COST_FEATURES + RATIO_FEATURE), "pct_of_total"].sum()
-print(f"\nEngineered contextual features (COST_RATIO, PROVIDER_Z_SCORE, PROVIDER_DAILY_VOLUME) "
+anomaly_total_pct = importance_df.loc[importance_df["feature"].isin(ANOMALY_FEATURES), "pct_of_total"].sum()
+print(f"\nEngineered contextual + anomaly features (COST_RATIO, PROVIDER_Z_SCORE, "
+      f"PROVIDER_DAILY_VOLUME, GEOGRAPHIC_MISMATCH, CLINICAL_INCONSISTENCY) "
       f"account for {context_total_pct:.1f}% of total |SHAP| weight.")
 print(f"Raw cost fields (BASE/CLAIM/PAYER cost + CLAIM_TO_BASE_RATIO) account for {raw_cost_total_pct:.1f}%.")
+print(f"Of which, the two new anomaly flags (GEOGRAPHIC_MISMATCH, CLINICAL_INCONSISTENCY) "
+      f"alone account for {anomaly_total_pct:.1f}%.")
 
 importance_df.drop(columns=["field"]).to_csv(f"{OUTPUT_DIR}/shap_importance_v2_robust.csv", index=False)
 agg_df.to_csv(f"{OUTPUT_DIR}/shap_importance_v2_robust_by_field.csv", index=False)

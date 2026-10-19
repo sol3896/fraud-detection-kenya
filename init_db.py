@@ -23,12 +23,19 @@ app launch.
 import os
 import sqlite3
 import hashlib
+import secrets
 
 DB_PATH = os.path.expanduser("~/synthea_kenya/output/model/claims_dashboard_v2.db")
 
 
-def hash_password(pw: str) -> str:
-    return hashlib.sha256(pw.encode()).hexdigest()
+def hash_password(pw: str, salt: str | None = None) -> tuple[str, str]:
+    """PBKDF2-HMAC-SHA256 with a random per-user salt - matches app.py's
+    hash_password() exactly, so a DB this script creates/migrates and the
+    app agree on format."""
+    if salt is None:
+        salt = secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac("sha256", pw.encode(), salt.encode(), 200_000).hex()
+    return digest, salt
 
 
 def main():
@@ -45,6 +52,7 @@ def main():
         CREATE TABLE IF NOT EXISTS users (
             username TEXT PRIMARY KEY,
             password_hash TEXT NOT NULL,
+            salt TEXT,
             role TEXT NOT NULL DEFAULT 'nurse'
         )
     """)
@@ -54,6 +62,7 @@ def main():
             first_name TEXT,
             last_name TEXT,
             gender TEXT,
+            dob TEXT,
             age INTEGER,
             county TEXT,
             registered_by TEXT,
@@ -73,6 +82,8 @@ def main():
             gender TEXT,
             county TEXT,
             service_date TEXT,
+            admission_datetime TEXT,
+            discharge_datetime TEXT,
             age REAL,
             length_of_stay_hours REAL,
             base_cost_kes REAL,
@@ -96,6 +107,30 @@ def main():
         conn.execute("UPDATE users SET role = 'admin' WHERE username = 'admin'")
         conn.commit()
         print("Migrated users table: added 'role' column (admin account set to role=admin).")
+    if "salt" not in users_cols:
+        # Existing rows get salt = NULL (old unsalted SHA-256 hash) - app.py's
+        # login flow verifies those the old way once, then transparently
+        # re-hashes with a fresh salt on that successful login.
+        conn.execute("ALTER TABLE users ADD COLUMN salt TEXT")
+        conn.commit()
+        print("Migrated users table: added 'salt' column (existing accounts upgrade on next login).")
+
+    # One-time: "auditor" used to mean claim-submitter - rename those
+    # existing accounts to "provider" (matches app.py's get_db() migration
+    # exactly, same PRAGMA user_version guard so it only runs once).
+    if conn.execute("PRAGMA user_version").fetchone()[0] < 1:
+        changed = conn.execute("UPDATE users SET role = 'provider' WHERE role = 'auditor'").rowcount
+        conn.execute("PRAGMA user_version = 1")
+        conn.commit()
+        if changed:
+            print(f"Migrated {changed} account(s) from role 'auditor' to 'provider' "
+                  "(auditor now means review-only).")
+
+    patients_cols = {row[1] for row in conn.execute("PRAGMA table_info(patients)").fetchall()}
+    if "dob" not in patients_cols:
+        conn.execute("ALTER TABLE patients ADD COLUMN dob TEXT")
+        conn.commit()
+        print("Migrated patients table: added 'dob' column (new registrations compute age from it).")
 
     claims_cols = {row[1] for row in conn.execute("PRAGMA table_info(claims_log)").fetchall()}
     added = []
@@ -105,6 +140,8 @@ def main():
         ("reviewed_at", "ALTER TABLE claims_log ADD COLUMN reviewed_at TEXT"),
         ("patient_id", "ALTER TABLE claims_log ADD COLUMN patient_id TEXT"),
         ("override_reason", "ALTER TABLE claims_log ADD COLUMN override_reason TEXT"),
+        ("admission_datetime", "ALTER TABLE claims_log ADD COLUMN admission_datetime TEXT"),
+        ("discharge_datetime", "ALTER TABLE claims_log ADD COLUMN discharge_datetime TEXT"),
     ]:
         if col not in claims_cols:
             conn.execute(ddl)
@@ -115,9 +152,10 @@ def main():
 
     cur = conn.execute("SELECT COUNT(*) FROM users")
     if cur.fetchone()[0] == 0:
+        admin_hash, admin_salt = hash_password("admin123")
         conn.execute(
-            "INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)",
-            ("admin", hash_password("admin123"), "admin"),
+            "INSERT INTO users (username, password_hash, salt, role) VALUES (?, ?, ?, ?)",
+            ("admin", admin_hash, admin_salt, "admin"),
         )
         conn.commit()
         print("Seeded demo admin account: admin / admin123 (role: admin)")

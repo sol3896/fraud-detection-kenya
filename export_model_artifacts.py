@@ -110,10 +110,22 @@ df["COST_RATIO"] = (df["CLAIM_AMOUNT_KES"] / median_lookup.replace(0, np.nan)).f
 group_median_lookup = {f"{c}||{co}": float(v) for (c, co), v in group_median.items()}
 
 # --- PROVIDER_Z_SCORE lookup ---
-provider_mean = train_df.groupby("PROVIDER_ID")["CLAIM_AMOUNT_KES"].mean()
-provider_std = train_df.groupby("PROVIDER_ID")["CLAIM_AMOUNT_KES"].std()
-global_mean = float(train_df["CLAIM_AMOUNT_KES"].mean())
-global_std = float(train_df["CLAIM_AMOUNT_KES"].std())
+# PROVIDER_Z_SCORE baseline is fit on this provider's TRAIN-LABELED-
+# LEGITIMATE claims only (never known fraud rows) - the acid-test SHAP
+# ablation (collusion_shap_plot.py) proved this feature was the dominant
+# proxy XGBoost used to catch collusion_ring (26.3% of SHAP weight on
+# those rows alone), because ring providers' aggregate mean/std was being
+# fit on a population where ring fraud claims vastly outnumbered their
+# real legitimate history - so the "baseline" a ring claim was compared
+# against was mostly other ring claims, not genuine normal behaviour.
+# Fitting only on legit rows matches realistic deployment too: a real
+# system builds a provider's cost profile from its established clean
+# history, not by blending in claims already known to be fraudulent.
+train_legit_df = train_df[train_df["IS_FRAUD"] == 0]
+provider_mean = train_legit_df.groupby("PROVIDER_ID")["CLAIM_AMOUNT_KES"].mean()
+provider_std = train_legit_df.groupby("PROVIDER_ID")["CLAIM_AMOUNT_KES"].std()
+global_mean = float(train_legit_df["CLAIM_AMOUNT_KES"].mean())
+global_std = float(train_legit_df["CLAIM_AMOUNT_KES"].std())
 mean_lookup = df["PROVIDER_ID"].map(provider_mean).fillna(global_mean)
 std_lookup = df["PROVIDER_ID"].map(provider_std).fillna(global_std).replace(0, global_std)
 df["PROVIDER_Z_SCORE"] = ((df["CLAIM_AMOUNT_KES"] - mean_lookup) / std_lookup).fillna(0.0)
@@ -134,8 +146,9 @@ COST_FEATURES = ["BASE_COST_KES", "CLAIM_AMOUNT_KES", "PAYER_COVERAGE_KES"]
 RATIO_FEATURE = ["CLAIM_TO_BASE_RATIO"]
 CONTEXT_FEATURES = ["COST_RATIO", "PROVIDER_Z_SCORE", "PROVIDER_DAILY_VOLUME"]
 OTHER_NUMERICAL = ["AGE", "LENGTH_OF_STAY_HOURS"]  # PATIENT_INCOME removed - not applicable to unemployed/informal-sector patients
-FEATURE_COLUMNS = COST_FEATURES + RATIO_FEATURE + CONTEXT_FEATURES + OTHER_NUMERICAL + encoded_categoricals
-RAW_FEATURE_COLUMNS = COST_FEATURES + RATIO_FEATURE + CONTEXT_FEATURES + OTHER_NUMERICAL + categorical_features
+ANOMALY_FEATURES = ["GEOGRAPHIC_MISMATCH", "CLINICAL_INCONSISTENCY"]
+FEATURE_COLUMNS = COST_FEATURES + RATIO_FEATURE + CONTEXT_FEATURES + OTHER_NUMERICAL + ANOMALY_FEATURES + encoded_categoricals
+RAW_FEATURE_COLUMNS = COST_FEATURES + RATIO_FEATURE + CONTEXT_FEATURES + OTHER_NUMERICAL + ANOMALY_FEATURES + categorical_features
 
 X_val = onehot_encode(df.loc[idx_val, RAW_FEATURE_COLUMNS], categorical_features, onehot_categories)[FEATURE_COLUMNS]
 y_val = y_full.loc[idx_val]
@@ -189,6 +202,15 @@ provider_org_lookup = {str(k): str(v) for k, v in provider_org_lookup.items()}
 provider_claim_counts = df["PROVIDER_ID"].value_counts()
 top_providers = [str(p) for p in provider_claim_counts.head(30).index]  # for a manageable dropdown
 
+# PROVIDER_COUNTY lookup (PROVIDER_ID -> facility county) so the dashboard
+# can compute GEOGRAPHIC_MISMATCH live for a newly submitted claim, the same
+# way kenyanise.py computed it for the training data.
+provider_county_lookup = (
+    df.drop_duplicates("PROVIDER_ID").set_index("PROVIDER_ID")["PROVIDER_COUNTY"].to_dict()
+    if "PROVIDER_COUNTY" in df.columns else {}
+)
+provider_county_lookup = {str(k): str(v) for k, v in provider_county_lookup.items()}
+
 # PROVIDER_ID is Synthea's anonymous per-clinician UUID (no readable name exists
 # for it), but providers_kenya.csv keys by ORGANIZATION_ID and gives the actual
 # facility name (e.g. "Level 6 - National Referral Hospital - Nyandarua Town").
@@ -227,6 +249,7 @@ artifacts = {
     "provider_avg_daily_volume": provider_avg_daily_volume,
     "global_avg_daily_volume": global_avg_daily_volume,
     "provider_org_lookup": provider_org_lookup,
+    "provider_county_lookup": provider_county_lookup,
     "organization_names": organization_names,
     "top_providers": top_providers,
     "conditions": conditions,

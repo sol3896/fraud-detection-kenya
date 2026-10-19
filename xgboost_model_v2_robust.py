@@ -121,7 +121,7 @@ NEEDED_COLS = list(set([
     "BASE_COST_KES", "CLAIM_AMOUNT_KES", "PAYER_COVERAGE_KES", "CLAIM_TO_BASE_RATIO",
     "AGE", "LENGTH_OF_STAY_HOURS", "ENCOUNTER_TYPE", "GENDER", "PATIENT_COUNTY",
     "IS_FRAUD", "PRIMARY_CONDITION", "PROVIDER_ID", "SERVICE_DATE", "ENCOUNTER_ID",
-    "FRAUD_TYPE",
+    "FRAUD_TYPE", "GEOGRAPHIC_MISMATCH", "CLINICAL_INCONSISTENCY",
 ]))
 df = pd.read_csv(DATA_PATH, usecols=NEEDED_COLS)
 print(f"Dataset shape: {df.shape}, fraud rate: {df['IS_FRAUD'].mean()*100:.2f}%")
@@ -187,10 +187,22 @@ median_lookup = median_lookup.fillna(global_median)
 df["COST_RATIO"] = (df["CLAIM_AMOUNT_KES"] / median_lookup.replace(0, np.nan)).fillna(1.0)
 
 # --- Provider peer deviation (z-score) ---
-provider_mean = train_df.groupby("PROVIDER_ID")["CLAIM_AMOUNT_KES"].mean()
-provider_std = train_df.groupby("PROVIDER_ID")["CLAIM_AMOUNT_KES"].std()
-global_mean = train_df["CLAIM_AMOUNT_KES"].mean()
-global_std = train_df["CLAIM_AMOUNT_KES"].std()
+# PROVIDER_Z_SCORE baseline is fit on this provider's TRAIN-LABELED-
+# LEGITIMATE claims only (never known fraud rows) - the acid-test SHAP
+# ablation (collusion_shap_plot.py) proved this feature was the dominant
+# proxy XGBoost used to catch collusion_ring (26.3% of SHAP weight on
+# those rows alone), because ring providers' aggregate mean/std was being
+# fit on a population where ring fraud claims vastly outnumbered their
+# real legitimate history - so the "baseline" a ring claim was compared
+# against was mostly other ring claims, not genuine normal behaviour.
+# Fitting only on legit rows matches realistic deployment too: a real
+# system builds a provider's cost profile from its established clean
+# history, not by blending in claims already known to be fraudulent.
+train_legit_df = train_df[train_df["IS_FRAUD"] == 0]
+provider_mean = train_legit_df.groupby("PROVIDER_ID")["CLAIM_AMOUNT_KES"].mean()
+provider_std = train_legit_df.groupby("PROVIDER_ID")["CLAIM_AMOUNT_KES"].std()
+global_mean = train_legit_df["CLAIM_AMOUNT_KES"].mean()
+global_std = train_legit_df["CLAIM_AMOUNT_KES"].std()
 
 mean_lookup = df["PROVIDER_ID"].map(provider_mean).fillna(global_mean)
 std_lookup = df["PROVIDER_ID"].map(provider_std).fillna(global_std).replace(0, global_std)
@@ -210,9 +222,15 @@ COST_FEATURES = ["BASE_COST_KES", "CLAIM_AMOUNT_KES", "PAYER_COVERAGE_KES"]
 RATIO_FEATURE = ["CLAIM_TO_BASE_RATIO"]
 CONTEXT_FEATURES = ["COST_RATIO", "PROVIDER_Z_SCORE", "PROVIDER_DAILY_VOLUME"]
 OTHER_NUMERICAL = ["AGE", "LENGTH_OF_STAY_HOURS"]  # PATIENT_INCOME removed - not applicable to unemployed/informal-sector patients
+# Anomaly flags inspired by the "location anomaly" / "clinical inconsistency"
+# categories real fraud-AI products (e.g. Smart Detect AI) advertise checking
+# for. Both are already fully computed, non-leaky per-row columns from
+# fix_dataset.py (no train-only fitting needed, unlike CONTEXT_FEATURES), so
+# they're loaded straight from the CSV like any other numeric feature.
+ANOMALY_FEATURES = ["GEOGRAPHIC_MISMATCH", "CLINICAL_INCONSISTENCY"]
 
-RAW_FEATURE_COLUMNS = COST_FEATURES + RATIO_FEATURE + CONTEXT_FEATURES + OTHER_NUMERICAL + categorical_features
-FEATURE_COLUMNS = COST_FEATURES + RATIO_FEATURE + CONTEXT_FEATURES + OTHER_NUMERICAL + encoded_categoricals
+RAW_FEATURE_COLUMNS = COST_FEATURES + RATIO_FEATURE + CONTEXT_FEATURES + OTHER_NUMERICAL + ANOMALY_FEATURES + categorical_features
+FEATURE_COLUMNS = COST_FEATURES + RATIO_FEATURE + CONTEXT_FEATURES + OTHER_NUMERICAL + ANOMALY_FEATURES + encoded_categoricals
 NOISY_COLUMNS = COST_FEATURES + RATIO_FEATURE + ["COST_RATIO", "PROVIDER_Z_SCORE"]
 
 print(f"\nRaw features going into SMOTENC ({len(RAW_FEATURE_COLUMNS)}): {RAW_FEATURE_COLUMNS}")

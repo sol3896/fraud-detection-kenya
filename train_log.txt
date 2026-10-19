@@ -1,0 +1,94 @@
+============================================================
+XGBOOST FRAUD MODEL - v2 ROBUST (v2.1: v2 data, one-hot, SMOTENC)
+============================================================
+
+Loading data...
+Dataset shape: (500000, 15), fraud rate: 13.00%
+Fraud type breakdown:
+FRAUD_TYPE
+none               435000
+upcoding            27083
+collusion_ring      21667
+phantom_billing     16250
+Name: count, dtype: int64
+Category counts: {col: len(cats) for col, cats in onehot_categories.items()}
+Train/Val/Test sizes: 350000/75000/75000
+
+Engineering contextual cost features (fit on train split only)...
+New features added: COST_RATIO, PROVIDER_Z_SCORE, PROVIDER_DAILY_VOLUME
+          COST_RATIO  PROVIDER_Z_SCORE  PROVIDER_DAILY_VOLUME
+count  500000.000000     500000.000000          500000.000000
+mean        1.774691          0.004382               1.441340
+std         2.932962          1.082764               0.835701
+min         0.023238        -39.543425               1.000000
+25%         0.621707         -0.352366               1.000000
+50%         1.000000         -0.221873               1.000000
+75%         1.604149         -0.036328               2.000000
+max        75.822952         78.789057              11.000000
+
+Raw features going into SMOTENC (12): ['BASE_COST_KES', 'CLAIM_AMOUNT_KES', 'PAYER_COVERAGE_KES', 'CLAIM_TO_BASE_RATIO', 'COST_RATIO', 'PROVIDER_Z_SCORE', 'PROVIDER_DAILY_VOLUME', 'AGE', 'LENGTH_OF_STAY_HOURS', 'ENCOUNTER_TYPE', 'GENDER', 'PATIENT_COUNTY']
+Final (one-hot) features for the model (41)
+
+Applying SMOTENC oversampling (categorical-aware, no one-hot blowup)...
+Before: {0: 304500, 1: 45500}  After: {0: 304500, 1: 304500}
+
+Injecting 8% missingness into training cost columns: ['BASE_COST_KES', 'CLAIM_AMOUNT_KES', 'PAYER_COVERAGE_KES', 'CLAIM_TO_BASE_RATIO', 'COST_RATIO', 'PROVIDER_Z_SCORE']
+Actual missing % achieved per column:
+BASE_COST_KES          7.975205
+CLAIM_AMOUNT_KES       7.955172
+PAYER_COVERAGE_KES     7.983908
+CLAIM_TO_BASE_RATIO    7.978161
+COST_RATIO             8.032512
+PROVIDER_Z_SCORE       8.030213
+dtype: float64
+
+One-hot encoding (post-resampling)...
+
+Training XGBoost (regularized config)...
+Dynamic scale_pos_weight: 1.000
+Best iteration: 999 (of 1000 max)
+
+============================================================
+RESULTS - v2 ROBUST MODEL (v2.1: v2 data, one-hot, SMOTENC)
+============================================================
+
+v2 - CLEAN test set
+F1: 0.7959  Balanced Accuracy: 0.9095  PR-AUC: 0.9081
+
+v2 - 5% noise+missingness test set
+F1: 0.5320  Balanced Accuracy: 0.8135  PR-AUC: 0.7669
+
+v2 - 10% noise+missingness test set
+F1: 0.4343  Balanced Accuracy: 0.7543  PR-AUC: 0.6587
+
+============================================================
+Test Classification Report (clean test set)
+============================================================
+              precision    recall  f1-score   support
+
+  Legitimate       0.98      0.95      0.97     65250
+       Fraud       0.74      0.87      0.80      9750
+
+    accuracy                           0.94     75000
+   macro avg       0.86      0.91      0.88     75000
+weighted avg       0.95      0.94      0.94     75000
+
+
+============================================================
+v1 (fragile) vs v2.1 (robust, v2-data, one-hot, SMOTENC) COMPARISON
+============================================================
+                     condition  v1_pr_auc  v2_pr_auc  v1_f1    v2_f1
+                CLEAN test set     0.9896   0.908110 0.9770 0.795924
+ 5% noise+missingness test set     0.7924   0.766946 0.5934 0.531973
+10% noise+missingness test set     0.5845   0.658684 0.4569 0.434255
+
+============================================================
+PER-FRAUD-TYPE RECALL (this saved model, clean test set)
+============================================================
+  collusion_ring     n=3246   caught=2271   recall=0.6996 mean_score=0.6310
+  phantom_billing    n=2410   caught=2380   recall=0.9876 mean_score=0.9875
+  upcoding           n=4094   caught=3785   recall=0.9245 mean_score=0.9210
+
+Model saved to /sessions/rcw-019tsuymc6sd36vcvi5teihn/synthea_kenya/output/model/xgboost_fraud_model_v2_robust.json
+Comparison saved to /sessions/rcw-019tsuymc6sd36vcvi5teihn/synthea_kenya/output/model/v1_vs_v2_comparison.csv
+Per-fraud-type recall saved to /sessions/rcw-019tsuymc6sd36vcvi5teihn/synthea_kenya/output/model/per_fraudtype_recall_v2data.csv (now from the ACTUAL saved model)

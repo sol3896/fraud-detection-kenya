@@ -52,6 +52,33 @@ df["CLAIM_TO_BASE_RATIO"] = (
     df["CLAIM_AMOUNT_KES"] / df["BASE_COST_KES"]
 ).round(3)
 
+# Fix 8 - Add GEOGRAPHIC_MISMATCH feature
+# Flags when a claim's facility county differs from the patient's own
+# registered county. Not fraud by itself (referral-level hospitals
+# legitimately serve the whole country), but it's one of the "location
+# anomaly" signals real fraud-detection products (e.g. Smart Detect AI)
+# advertise checking for, so it's exposed to the model as a weak signal
+# to combine with everything else rather than a hard rule.
+df["GEOGRAPHIC_MISMATCH"] = (
+    df["PATIENT_COUNTY"] != df["PROVIDER_COUNTY"]
+).astype(int)
+
+# Fix 9 - Add CLINICAL_INCONSISTENCY feature
+# Flags claims whose PRIMARY_CONDITION is biologically inconsistent with
+# the patient's recorded GENDER (currently: a maternity condition on a
+# male patient). kenyanise.py's build_master_dataset() already fixed this
+# for all legitimate rows and deliberately reintroduced it for a slice of
+# phantom_billing fraud as a realistic "templated claim" fraud signature -
+# this is the feature that turns that injected inconsistency into a usable
+# model input (another of the "clinical inconsistency" signals real
+# fraud-detection products advertise checking for).
+MATERNITY_CONDITIONS = {"Pregnant (finding)", "Pre-eclampsia (disorder)"}
+df["CLINICAL_INCONSISTENCY"] = (
+    (df["GENDER"] == "M") & df["PRIMARY_CONDITION"].isin(MATERNITY_CONDITIONS)
+).astype(int)
+print(f"\nGEOGRAPHIC_MISMATCH rate: {df['GEOGRAPHIC_MISMATCH'].mean()*100:.2f}%")
+print(f"CLINICAL_INCONSISTENCY rate: {df['CLINICAL_INCONSISTENCY'].mean()*100:.2f}%")
+
 # Verify final state
 print(f"\nFinal shape: {df.shape}")
 print(f"\nMissing values after fixes:")
