@@ -1,0 +1,45 @@
+PATIENT_ID,PROVIDER_ID,PRIMARY_CONDITION,PATIENT_COUNTY,ENCOUNTER_TYPE,GENDER,SERVICE_DATE,AGE,LENGTH_OF_STAY_HOURS,BASE_COST_KES,CLAIM_AMOUNT_KES,PAYER_COVERAGE_KES,CLAIM_TO_BASE_RATIO
+,c422b2e8-5183-32da-af5d-e160ba166867,Chronic type B viral hepatitis (disorder),Nakuru,inpatient,F,2026-10-07,62,95.0,37990.28,39889.79,9117.67,1.05
+,4ff14d96-8ce6-3457-ad14-a76003b1ff24,Non-small cell lung cancer (disorder),Siaya,ambulatory,F,2026-10-06,48,7.4,2535.46,2814.36,2535.46,1.11
+,2007f83e-4486-3e6f-adef-f7ee06765edc,History of autologous bone marrow transplant (situation),Meru,ambulatory,F,2026-10-14,47,9.1,2747.04,6153.37,2747.04,2.24
+,229f48e5-4ef0-3883-8c18-56121e961b75,Primary malignant neoplasm of colon (disorder),Nyeri,ambulatory,F,2026-10-12,68,7.2,2352.61,2799.61,2352.61,1.19
+,35214c1e-442d-3eff-8b04-7bb09a0c00e9,History of artificial joint (situation),Kericho,wellness,F,2026-10-01,64,1.6,1465.74,1656.29,1465.74,1.13
+,d5bdfb8f-5d3c-3c64-b17f-2536cd333f8f,Multiple myeloma (disorder),Murang'a,emergency,F,2026-10-11,8,4.6,17103.97,19669.57,17103.97,1.15
+,2007f83e-4486-3e6f-adef-f7ee06765edc,Social migrant (finding),Mombasa,home,F,2026-10-07,26,2.6,5502.97,6218.36,4567.47,1.13
+,35214c1e-442d-3eff-8b04-7bb09a0c00e9,Tricuspid valve stenosis (disorder),Kericho,inpatient,M,2026-10-07,82,38.0,30971.83,33449.58,7433.24,1.08
+,e73a1d3b-6273-3af1-8906-65a415d668ff,Tricuspid valve regurgitation (disorder),Nakuru,emergency,F,2026-10-04,29,12.6,18699.0,39828.87,18699.0,2.13
+,4ff14d96-8ce6-3457-ad14-a76003b1ff24,Unhealthy alcohol drinking behavior (finding),Kakamega,inpatient,M,2026-10-10,19,38.0,31781.24,64833.73,7627.5,2.04
+,a6e163f1-4d67-3e66-9892-fb7b8f34594d,Suspected prostate cancer (situation),Kakamega,outpatient,M,2026-10-02,54,5.0,5045.54,6054.65,1564.12,1.2
+,a6e163f1-4d67-3e66-9892-fb7b8f34594d,Familial Alzheimer's disease of early onset (disorder),Murang'a,wellness,M,2026-10-14,49,1.8,1433.35,1476.35,1433.35,1.03
+,4ff14d96-8ce6-3457-ad14-a76003b1ff24,History of lower limb amputation (situation),Siaya,inpatient,F,2026-10-18,65,66.0,37993.29,38373.22,9118.39,1.01
+,a6e163f1-4d67-3e66-9892-fb7b8f34594d,History of lower limb amputation (situation),Kericho,emergency,M,2026-10-09,29,13.7,18342.57,20910.53,18342.57,1.14
+,35214c1e-442d-3eff-8b04-7bb09a0c00e9,Serving in military service (finding),Kajiado,outpatient,F,2026-10-18,32,4.9,4972.69,11486.91,1541.53,2.31
+,e73a1d3b-6273-3af1-8906-65a415d668ff,Traumatic dislocation of temporomandibular joint (disorder),Nakuru,outpatient,F,2026-10-13,22,2.5,4932.97,5672.92,1529.22,1.15
+,a6e163f1-4d67-3e66-9892-fb7b8f34594d,Atrial fibrillation (disorder),Migori,ambulatory,F,2026-10-05,10,3.1,2550.36,2601.37,2550.36,1.02
+,a6e163f1-4d67-3e66-9892-fb7b8f34594d,Small cell carcinoma of lung (disorder),Nakuru,home,F,2026-10-17,67,2.8,5169.34,11217.47,4290.55,2.17
+,cdb628b5-26f1-303d-a3f8-d17089034fc4,Seasonal allergic rhinitis (disorder),Homa Bay,urgentcare,M,2026-10-18,42,2.4,5483.15,12611.24,1370.79,2.3
+,51ceb646-39bf-3a94-a8a7-158f62f1db97,History of appendectomy (situation),Kakamega,ambulatory,F,2026-10-16,3,7.9,2482.68,2805.43,2482.68,1.13
+,cdb628b5-26f1-303d-a3f8-d17089034fc4,Major depression  single episode (disorder),Siaya,urgentcare,F,2026-10-08,34,1.8,4863.27,5106.43,1215.82,1.05
+,e73a1d3b-6273-3af1-8906-65a415d668ff,Traumatic dislocation of temporomandibular joint (disorder),Kiambu,outpatient,F,2026-10-05,4,6.6,5385.25,5492.95,1669.43,1.02
+,35214c1e-442d-3eff-8b04-7bb09a0c00e9,Eclampsia in pregnancy (disorder),Kiambu,home,M,2026-10-09,58,2.5,5754.1,6904.92,4775.9,1.2
+,229f48e5-4ef0-3883-8c18-56121e961b75,Primary malignant neoplasm of colon (disorder),Nyandarua,emergency,F,2026-10-11,59,2.0,16822.8,18000.4,16822.8,1.07
+,c422b2e8-5183-32da-af5d-e160ba166867,Metastatic malignant neoplasm to colon (disorder),Uasin Gishu,outpatient,M,2026-10-13,66,3.4,5109.41,12364.77,1583.92,2.42
+,229f48e5-4ef0-3883-8c18-56121e961b75,Chronic kidney disease stage 3 (disorder),Kakamega,home,M,2026-10-01,80,1.1,5434.14,5651.51,4510.34,1.04
+,35214c1e-442d-3eff-8b04-7bb09a0c00e9,Proliferative diabetic retinopathy due to type II diabetes mellitus,Homa Bay,wellness,F,2026-10-09,40,2.2,1486.86,1739.63,1486.86,1.17
+,229f48e5-4ef0-3883-8c18-56121e961b75,Infection of tooth (disorder),Kajiado,emergency,M,2026-10-15,57,13.1,18443.22,39099.63,18443.22,2.12
+,e520ef9b-4c8b-3693-861d-7134935f7a33,Chronic hepatitis C (disorder),Kericho,inpatient,F,2026-10-03,4,42.0,33273.03,38263.98,7985.53,1.15
+,a6e163f1-4d67-3e66-9892-fb7b8f34594d,Burn injury (morphologic abnormality),Nyeri,inpatient,F,2026-10-14,68,110.0,44326.8,52305.62,10638.43,1.18
+,a6e163f1-4d67-3e66-9892-fb7b8f34594d,Injury of heart (disorder),Bungoma,urgentcare,F,2026-10-03,29,1.2,5130.99,5182.3,1282.75,1.01
+,229f48e5-4ef0-3883-8c18-56121e961b75,Attempted suicide by cutting or stabbing,Meru,wellness,M,2026-10-03,62,3.0,1489.8,1638.78,1489.8,1.1
+,7529c248-9d86-315b-ad9c-735d27033a99,History of lower limb amputation (situation),Nakuru,urgentcare,F,2026-10-12,15,4.1,4834.49,5076.21,1208.62,1.05
+,e520ef9b-4c8b-3693-861d-7134935f7a33,Septic shock (disorder),Kilifi,wellness,F,2026-10-06,74,2.2,1485.96,1575.12,1485.96,1.06
+,7529c248-9d86-315b-ad9c-735d27033a99,Alzheimer's disease (disorder),Kajiado,emergency,M,2026-10-10,22,8.3,18382.97,21140.42,18382.97,1.15
+,cdb628b5-26f1-303d-a3f8-d17089034fc4,Chronic obstructive bronchitis (disorder),Homa Bay,home,F,2026-10-13,57,2.2,5388.88,5496.66,4472.77,1.02
+,a6e163f1-4d67-3e66-9892-fb7b8f34594d,No condition recorded,Meru,inpatient,M,2026-10-03,45,65.0,36302.45,43199.92,8712.59,1.19
+,35214c1e-442d-3eff-8b04-7bb09a0c00e9,Primary dental caries (disorder),Nyeri,outpatient,M,2026-10-07,41,4.8,4701.5,4748.52,1457.46,1.01
+RING-PATIENT-029,0767c58e-44a9-3991-aab9-bacd36996c21,Part-time employment (finding),Kilifi,wellness,M,2020-06-09,18,10.848333333333333,996.59,1030.41,1013.27,1.034
+RING-PATIENT-217,6cbd8f69-b923-3dcf-bec0-4e96df44ba41,No condition recorded,Machakos,emergency,F,1991-07-25,55,23.32111111111111,20607.64,22366.37,21248.05,1.085
+RING-PATIENT-298,1cc1c92f-7f93-32f0-840d-2cac5cc50994,Prediabetes (finding),Machakos,wellness,F,2001-11-15,61,3.418888888888889,1724.91,1942.81,1812.87,1.126
+RING-PATIENT-202,229f48e5-4ef0-3883-8c18-56121e961b75,Gingival disease (disorder),Kisumu,ambulatory,F,2021-11-07,64,15.581111111111111,1847.27,2197.3,2164.62,1.189
+RING-PATIENT-026,4ff14d96-8ce6-3457-ad14-a76003b1ff24,No condition recorded,Uasin Gishu,ambulatory,M,2018-12-28,71,16.503055555555555,4606.81,4843.4,4536.71,1.051
+RING-PATIENT-214,4ff14d96-8ce6-3457-ad14-a76003b1ff24,No condition recorded,Murang'a,ambulatory,M,2002-02-28,47,20.552222222222223,1873.23,2360.97,2222.78,1.26

@@ -560,6 +560,10 @@ def get_db():
         conn.execute("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'nurse'")
         conn.execute("UPDATE users SET role = 'admin' WHERE username = 'admin'")
         conn.commit()
+    if "provider_id" not in users_cols:
+        # Facility (provider_id) a provider account belongs to; NULL = not yet assigned.
+        conn.execute("ALTER TABLE users ADD COLUMN provider_id TEXT")
+        conn.commit()
     if "salt" not in users_cols:
         # Existing rows get salt = NULL, meaning "still the old unsalted
         # SHA-256 hash" - login() below verifies those the old way once,
@@ -613,6 +617,7 @@ def get_db():
         # history yet) and which model actually triggered the final label.
         ("graphsage_score", "ALTER TABLE claims_log ADD COLUMN graphsage_score REAL"),
         ("flagged_by", "ALTER TABLE claims_log ADD COLUMN flagged_by TEXT"),
+        ("scheme", "ALTER TABLE claims_log ADD COLUMN scheme TEXT"),
     ]:
         if col not in claims_cols:
             conn.execute(ddl)
@@ -782,7 +787,39 @@ def graphsage_ring_score(patient_id, provider_id, gs_artifacts: dict | None):
     return 1.0 / (1.0 + np.exp(-logit))
 
 
-def hybrid_label(xgb_proba: float, gs_score, artifacts: dict, gs_artifacts: dict | None) -> tuple[str, str]:
+PROVIDER_CLUSTER_MIN_EXPOSURE = 0.5
+
+
+@st.cache_resource
+def provider_exposure_table():
+    """Provider-level fallback for patients GraphSAGE has never seen.
+
+    For each provider in the graph: the claim-weighted share of its frequent
+    patients whose (patient, provider) pair GraphSAGE rates at or above its
+    auto-flag threshold. On the project data this separates the 12 injected
+    ring providers (share >= 0.57) from all 1,157 others (share 0.0). It is a
+    provider-level signal, so it only ever raises a claim to MEDIUM."""
+    gs, nb = load_graphsage_artifacts(), load_graph_neighborhood()
+    if gs is None or nb is None:
+        return {}
+    thr, out = gs["t_graphsage"], {}
+    for prov, pairs in nb["provider_top_patients"].items():
+        scored = [(graphsage_ring_score(p, prov, gs), n) for p, n in pairs]
+        scored = [(sc, n) for sc, n in scored if sc is not None]
+        total = sum(n for _, n in scored)
+        if total:
+            out[prov] = sum(n for sc, n in scored if sc >= thr) / total
+    return out
+
+
+def provider_cluster_exposure(provider_id):
+    if provider_id is None:
+        return None
+    return provider_exposure_table().get(str(provider_id))
+
+
+def hybrid_label(xgb_proba: float, gs_score, artifacts: dict, gs_artifacts: dict | None,
+                 provider_id=None) -> tuple[str, str]:
     """Combines the two models with an OR rule: escalate to HIGH whenever
     EITHER model's own tuned threshold fires (validated in
     hybrid_ensemble_eval.py / tune_hybrid_threshold.py - the two models'
@@ -797,11 +834,26 @@ def hybrid_label(xgb_proba: float, gs_score, artifacts: dict, gs_artifacts: dict
         return "HIGH", "both models (cost anomaly + relational pattern)"
     if gs_flag:
         return "HIGH", "relational pattern (GraphSAGE) - no cost anomaly on its own"
+    exposure = provider_cluster_exposure(provider_id) if gs_score is None else None
+    in_cluster = exposure is not None and exposure >= PROVIDER_CLUSTER_MIN_EXPOSURE
     if xgb_lab == "HIGH":
+        if in_cluster:
+            return "HIGH", "both models (cost anomaly + provider in a flagged relational cluster)"
         return "HIGH", "cost anomaly (XGBoost)"
+    if in_cluster:
+        return "MEDIUM", "provider in a flagged relational cluster (GraphSAGE, provider-level)"
     if xgb_lab == "MEDIUM":
         return "MEDIUM", "cost anomaly (XGBoost, below auto-flag threshold)"
     return "LOW", "neither model flagged this claim"
+
+
+def gs_missing_note(provider_id):
+    exposure = provider_cluster_exposure(provider_id)
+    base = "No relational (GraphSAGE) score - patient or provider not in the graph yet."
+    if exposure is not None and exposure >= PROVIDER_CLUSTER_MIN_EXPOSURE:
+        return (base + f" This provider sits in a flagged cluster: {exposure*100:.0f}% of its regular "
+                "patients' claims are rated as ring-like, so the claim is routed to manual audit.")
+    return base
 
 
 def label_badge(label: str) -> str:
@@ -811,6 +863,10 @@ def label_badge(label: str) -> str:
 
 
 def log_claim(conn, raw, source, username, score, label, gs_score=None, flagged_by=None):
+    scheme = raw.get("SCHEME")
+    if not scheme and raw.get("PATIENT_ID"):
+        r = conn.execute("SELECT scheme FROM patients WHERE patient_id = ?", (str(raw["PATIENT_ID"]),)).fetchone()
+        scheme = r[0] if r and r[0] else None
     cur = conn.execute("""
         INSERT INTO claims_log (
             submitted_at, submitted_by, source, patient_id, provider_id,
@@ -818,8 +874,8 @@ def log_claim(conn, raw, source, username, score, label, gs_score=None, flagged_
             admission_datetime, discharge_datetime,
             age, length_of_stay_hours, base_cost_kes, claim_amount_kes,
             payer_coverage_kes, claim_to_base_ratio, fraud_score, risk_label,
-            graphsage_score, flagged_by, review_status
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            graphsage_score, flagged_by, review_status, scheme
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     """, (
         dt.datetime.now().isoformat(timespec="seconds"), username, source,
         raw.get("PATIENT_ID"), str(raw["PROVIDER_ID"]), raw["PRIMARY_CONDITION"],
@@ -827,7 +883,7 @@ def log_claim(conn, raw, source, username, score, label, gs_score=None, flagged_
         raw.get("ADMISSION_DATETIME"), raw.get("DISCHARGE_DATETIME"),
         raw["AGE"], raw["LENGTH_OF_STAY_HOURS"],
         raw["BASE_COST_KES"], raw["CLAIM_AMOUNT_KES"], raw["PAYER_COVERAGE_KES"],
-        raw["CLAIM_TO_BASE_RATIO"], score, label, gs_score, flagged_by, "pending",
+        raw["CLAIM_TO_BASE_RATIO"], score, label, gs_score, flagged_by, "pending", scheme,
     ))
     conn.commit()
     return cur.lastrowid
@@ -926,6 +982,72 @@ def login_screen(conn):
 # ============================================================
 # REGISTER PATIENT (nurse / admin)
 # ============================================================
+# Demo facility accounts: (username, provider_id prefix). Created on first run
+# if missing. Demo password only - change or remove for any real deployment.
+DEMO_FACILITY_ACCOUNTS = [
+    ("nyalenda_hospital", "cdb628b5"),
+    ("nairobi_referral", "e73a1d3b"),
+    ("kikuyu_clinic", "2007f83e"),
+    ("nyali_faith_hospital", "a6e163f1"),
+    ("kajiado_health_centre", "4ff14d96"),
+    ("nyandarua_hospital", "229f48e5"),
+]
+DEMO_FACILITY_PASSWORD = os.environ.get("DEMO_ACCOUNT_PASSWORD", "Demo@2026")
+# One demo nurse per demo facility: (username, provider_id prefix)
+DEMO_NURSE_ACCOUNTS = [
+    ("nurse_nyalenda", "cdb628b5"),
+    ("nurse_nairobi", "e73a1d3b"),
+    ("nurse_kikuyu", "2007f83e"),
+    ("nurse_nyali", "a6e163f1"),
+    ("nurse_kajiado", "4ff14d96"),
+    ("nurse_nyandarua", "229f48e5"),
+]
+FACILITY_ROLES = ("nurse", "provider")
+
+
+def seed_demo_facility_accounts(conn, artifacts):
+    changed = False
+    for role, accounts in (("provider", DEMO_FACILITY_ACCOUNTS), ("nurse", DEMO_NURSE_ACCOUNTS)):
+      for username, prefix in accounts:
+        pid = next((p for p in artifacts["top_providers"] if p.startswith(prefix)), None)
+        if pid is None or conn.execute("SELECT 1 FROM users WHERE username = ?", (username,)).fetchone():
+            continue
+        h, salt = hash_password(DEMO_FACILITY_PASSWORD)
+        conn.execute("INSERT INTO users (username, password_hash, salt, role, provider_id) VALUES (?, ?, ?, ?, ?)",
+                     (username, h, salt, role, pid))
+        changed = True
+    if changed:
+        conn.commit()
+
+
+def current_facility(conn):
+    """provider_id (facility) the logged-in PROVIDER account is tied to, or None."""
+    if st.session_state.get("role") not in FACILITY_ROLES:
+        return None
+    r = conn.execute("SELECT provider_id FROM users WHERE username = ?",
+                     (st.session_state.get("username"),)).fetchone()
+    return r[0] if r and r[0] else None
+
+
+def facility_label(artifacts, pid):
+    org_id = artifacts["provider_org_lookup"].get(pid, "unknown")
+    return f"{artifacts.get('organization_names', {}).get(org_id, 'Facility ' + org_id[:8])}  ·  Provider {pid[:8]}"
+
+
+def require_facility(conn, artifacts):
+    """For provider accounts: returns the facility id, or shows a message and returns False if unassigned.
+    Returns None for non-provider roles (no restriction)."""
+    if st.session_state.get("role") not in FACILITY_ROLES:
+        return None
+    fac = current_facility(conn)
+    if not fac:
+        st.warning("Your account is not linked to a facility yet. Ask an administrator to assign one "
+                   "(Manage users -> Assign a facility).")
+        return False
+    st.caption(f"Facility: {facility_label(artifacts, fac)}")
+    return fac
+
+
 def register_patient_page(conn, artifacts):
     st.header("Register patient")
     with st.form("register_patient_form", clear_on_submit=True):
@@ -940,7 +1062,7 @@ def register_patient_page(conn, artifacts):
                 min_value=dt.date(1900, 1, 1), max_value=dt.date.today(),
             )
         county = st.selectbox("County", artifacts["counties"])
-        scheme = st.selectbox("Insurance scheme", list(cref.SCHEMES),
+        scheme = st.selectbox("Insurance scheme", cref.SCHEME_CHOICES,
                               help="Determines how much of the tariff the payer covers on claims.")
         submitted = st.form_submit_button("Register patient", type="primary")
 
@@ -1019,11 +1141,9 @@ def encounter_time_inputs(encounter_type, key, start_default=None, end_default=N
 
 def record_encounter_page(conn, artifacts):
     st.header("Record encounter")
-    st.caption(
-        "Clinical record of a visit: diagnosis, admission/visit times, and the medication, tests and "
-        "procedures ordered. The provider's billing team then picks this encounter on Submit claim, "
-        "prices it, and submits the claim - so the claim is built from what clinically happened."
-    )
+    facility = require_facility(conn, artifacts)
+    if facility is False:
+        return
     patients_df = pd.read_sql_query(
         "SELECT patient_id, first_name, last_name, gender, county FROM patients ORDER BY registered_at DESC LIMIT 300",
         conn,
@@ -1043,7 +1163,8 @@ def record_encounter_page(conn, artifacts):
     with c1:
         encounter_type = st.selectbox("Encounter type", artifacts["encounter_types"], key="rec_etype")
         provider_id = st.selectbox(
-            "Facility / provider", artifacts["top_providers"],
+            "Facility / provider", [facility] if facility else artifacts["top_providers"],
+            disabled=bool(facility),
             format_func=lambda pid: f"{org_names.get(org_lookup.get(pid, ''), 'Facility ' + org_lookup.get(pid, 'unknown')[:8])}"
                                     f"  ·  Provider {pid[:8]}",
             key="rec_provider",
@@ -1056,7 +1177,6 @@ def record_encounter_page(conn, artifacts):
         start_dt, end_dt, _los = encounter_time_inputs(encounter_type, "rec")
 
     st.subheader("Medication, tests and procedures ordered")
-    st.caption("Quantities only - prices are added later when the claim is billed.")
     bundle_key = f"rec_bundle_{encounter_type}"
     if bundle_key not in st.session_state:
         st.session_state[bundle_key] = pd.DataFrame(
@@ -1096,8 +1216,9 @@ def record_encounter_page(conn, artifacts):
     st.subheader("Recent encounters")
     rec = pd.read_sql_query(
         "SELECT 'E-' || id AS Encounter, patient_id AS Patient, encounter_type AS Type, primary_condition AS Diagnosis, "
-        "start_datetime AS Start, status AS Status FROM encounters ORDER BY id DESC LIMIT 20",
-        conn,
+        "start_datetime AS Start, status AS Status FROM encounters "
+        + ("WHERE provider_id = ? " if facility else "") + "ORDER BY id DESC LIMIT 20",
+        conn, params=(facility,) if facility else (),
     )
     if rec.empty:
         st.caption("No encounters recorded yet.")
@@ -1110,8 +1231,7 @@ def render_patient_history(conn, patient_id, condition, scheme):
     scheme, and what the system already knows about their recent claims."""
     st.subheader("Patient history")
     if patient_id is None:
-        st.caption("Walk-in - no patient record linked, so there is no history to show. "
-                   f"Coverage will be calculated under the default scheme ({cref.DEFAULT_SCHEME}).")
+        st.caption(f"Walk-in patient - coverage calculated under {cref.DEFAULT_SCHEME}.")
         return
     p = conn.execute(
         "SELECT first_name, last_name, gender, dob, age, county FROM patients WHERE patient_id = ?",
@@ -1177,11 +1297,13 @@ def render_bed_panel(conn, provider_id, admission_dt):
         st.error("No beds available at this facility on the admission date - an inpatient claim here needs scrutiny.")
     elif available <= max(1, capacity // 20):
         st.warning("Facility is close to full on the admission date.")
-    st.caption("Illustrative demo data (bed counts are not in the source dataset).")
 
 
 def submit_claim_page(conn, model, artifacts, gs_artifacts=None):
     st.header("Submit a claim")
+    facility = require_facility(conn, artifacts)
+    if facility is False:
+        return
     fd = artifacts["form_defaults"]
     org_names = artifacts.get("organization_names", {})
     org_lookup = artifacts["provider_org_lookup"]
@@ -1199,7 +1321,9 @@ def submit_claim_page(conn, model, artifacts, gs_artifacts=None):
         enc_rows = conn.execute(
             "SELECT e.id, e.patient_id, p.first_name, p.last_name, e.provider_id, e.encounter_type, "
             "e.primary_condition, e.start_datetime, e.end_datetime, e.ward FROM encounters e "
-            "LEFT JOIN patients p ON p.patient_id = e.patient_id WHERE e.status = 'open' ORDER BY e.id DESC LIMIT 200"
+            "LEFT JOIN patients p ON p.patient_id = e.patient_id WHERE e.status = 'open' "
+            + ("AND e.provider_id = ? " if facility else "") + "ORDER BY e.id DESC LIMIT 200",
+            (facility,) if facility else (),
         ).fetchall()
         if not enc_rows:
             st.info("No unbilled encounters yet - a nurse records them on Record encounter. "
@@ -1214,8 +1338,6 @@ def submit_claim_page(conn, model, artifacts, gs_artifacts=None):
             enc = {"id": r[0], "patient_id": r[1], "provider_id": r[4], "encounter_type": r[5],
                    "condition": r[6], "start": dt.datetime.fromisoformat(r[7]),
                    "end": dt.datetime.fromisoformat(r[8]), "ward": r[9]}
-            st.caption("Patient, facility, diagnosis, times and services come from the clinical record "
-                       "(locked). You add the billing: prices, then submit.")
     ek = enc["id"] if enc else "manual"
     lock = enc is not None
 
@@ -1272,11 +1394,11 @@ def submit_claim_page(conn, model, artifacts, gs_artifacts=None):
     with st.container():
         col1, col2 = st.columns(2)
         with col1:
-            providers = artifacts["top_providers"]
+            providers = [facility] if facility else artifacts["top_providers"]
             provider_id = st.selectbox(
                 "Provider", providers, format_func=_provider_label,
                 index=_idx(providers, enc["provider_id"]) if enc else 0,
-                disabled=lock, key=f"prov_{ek}",
+                disabled=lock or bool(facility), key=f"prov_{ek}",
             )
             org_id = org_lookup.get(provider_id, "unknown")
             org_name = org_names.get(org_id, "unknown facility")
@@ -1319,11 +1441,6 @@ def submit_claim_page(conn, model, artifacts, gs_artifacts=None):
     # ---------------- itemised bill ----------------
     st.divider()
     st.subheader("Itemised bill")
-    st.caption(
-        "Add the services, medication and tests billed. Base cost is the sum of the reference tariff prices; "
-        "the claim amount is the sum of what is actually billed (edit a billed unit price to bill above/below "
-        "tariff). Payer coverage is calculated from the patient's scheme, not typed in."
-    )
     if st.session_state.get("bill_bundle_for") != (encounter_type, ek):
         st.session_state.bill_bundle_for = (encounter_type, ek)
         if enc is not None:
@@ -1391,9 +1508,7 @@ def submit_claim_page(conn, model, artifacts, gs_artifacts=None):
     t3.metric("Payer coverage", f"{payer_coverage:,.0f}", help=f"Calculated for scheme: {scheme}")
     t4.metric("Patient balance", f"{claim_amount - payer_coverage:,.0f}")
     t5.metric("Claim-to-base ratio", claim_to_base_ratio)
-    st.caption("Reference prices come from published SHA/SHIF rates, public-hospital service charters, KNH "
-               "procurement costs and market ranges (see 'Price basis'); items marked Estimate have no "
-               "published source. Bed counts and scheme rules are illustrative - see claim_reference.py.")
+    st.caption("Prices follow published Kenyan tariffs and market ranges (see Price basis); items marked Estimate have no published source.")
 
     submitted = st.button("Submit claim", type="primary", disabled=not lines,
                           help="Submits this claim and scores it immediately; it then appears on the claims dashboard for audit review.")
@@ -1414,7 +1529,7 @@ def submit_claim_page(conn, model, artifacts, gs_artifacts=None):
         feat = engineer_row(raw, artifacts, conn)
         score, xgb_only_label = score_row(feat, model, artifacts)
         gs_score = graphsage_ring_score(patient_id, provider_id, gs_artifacts)
-        label, flagged_by = hybrid_label(score, gs_score, artifacts, gs_artifacts)
+        label, flagged_by = hybrid_label(score, gs_score, artifacts, gs_artifacts, provider_id)
         new_claim_id = log_claim(conn, raw, "manual", st.session_state.username, score, label, gs_score, flagged_by)
         save_claim_items(conn, new_claim_id, lines)
         if enc is not None:
@@ -1440,11 +1555,7 @@ def submit_claim_page(conn, model, artifacts, gs_artifacts=None):
                 st.success(label_badge(label))
         st.caption(f"Flagged by: {flagged_by}")
         if gs_score is None:
-            st.caption(
-                "No GraphSAGE relational score: this patient and/or provider has no claim "
-                "history in the training graph yet, so there's nothing to measure a repeating "
-                "pattern against - the result above is from XGBoost's cost-anomaly read alone."
-            )
+            st.caption(gs_missing_note(provider_id))
         st.caption(
             f"XGBoost thresholds: score < {artifacts['t_low']:.3f} = low risk, "
             f"{artifacts['t_low']:.3f}–{artifacts['t_high']:.3f} = medium (manual review), "
@@ -1467,11 +1578,14 @@ REQUIRED_CSV_COLUMNS = [
 
 def upload_csv_page(conn, model, artifacts, gs_artifacts=None):
     st.header("Batch-score claims from a CSV")
+    facility = require_facility(conn, artifacts)
+    if facility is False:
+        return
     st.caption("Required columns: " + ", ".join(REQUIRED_CSV_COLUMNS) + ". Optional: PATIENT_ID.")
 
     template = pd.DataFrame([{
         "PATIENT_ID": "",
-        "PROVIDER_ID": artifacts["top_providers"][0],
+        "PROVIDER_ID": facility or artifacts["top_providers"][0],
         "PRIMARY_CONDITION": artifacts["conditions"][0],
         "PATIENT_COUNTY": artifacts["counties"][0],
         "ENCOUNTER_TYPE": artifacts["encounter_types"][0],
@@ -1493,6 +1607,13 @@ def upload_csv_page(conn, model, artifacts, gs_artifacts=None):
         st.error(f"Missing required columns: {missing}")
         return
 
+    if facility:
+        wrong = df[df["PROVIDER_ID"].astype(str) != facility]
+        if len(wrong):
+            st.error(f"{len(wrong)} of {len(df)} rows are for a different facility. This account can only upload "
+                     f"claims for {facility_label(artifacts, facility)}. Fix the PROVIDER_ID column and upload again.")
+            st.dataframe(wrong[["PROVIDER_ID"]].drop_duplicates().head(10), use_container_width=True)
+            return
     st.write(f"{len(df)} claims loaded. Scoring...")
     scores, labels, gs_scores, flagged_bys = [], [], [], []
     for _, row in df.iterrows():
@@ -1501,7 +1622,7 @@ def upload_csv_page(conn, model, artifacts, gs_artifacts=None):
         feat = engineer_row(raw, artifacts, conn)
         score, _ = score_row(feat, model, artifacts)
         gs_score = graphsage_ring_score(raw["PATIENT_ID"], raw["PROVIDER_ID"], gs_artifacts)
-        label, flagged_by = hybrid_label(score, gs_score, artifacts, gs_artifacts)
+        label, flagged_by = hybrid_label(score, gs_score, artifacts, gs_artifacts, raw["PROVIDER_ID"])
         log_claim(conn, raw, "csv", st.session_state.username, score, label, gs_score, flagged_by)
         scores.append(score)
         labels.append(label)
@@ -1560,12 +1681,15 @@ def claims_dashboard_page(conn, artifacts):
     # read straight from the shared database, so an auditor's approve/reject/
     # escalate shows up here on the provider's next page load.
     is_provider = st.session_state.get("role") == "provider"
-    where = "WHERE submitted_by = ? " if is_provider else ""
-    params = (st.session_state.get("username"),) if is_provider else ()
+    facility = require_facility(conn, artifacts)
+    if facility is False:
+        return
+    where = "WHERE provider_id = ? " if is_provider else ""
+    params = (facility,) if is_provider else ()
     df = pd.read_sql_query(
         "SELECT id, submitted_at, patient_id, provider_id, primary_condition, "
         "claim_amount_kes, fraud_score, risk_label, review_status, "
-        "graphsage_score, flagged_by FROM claims_log " + where +
+        "graphsage_score, flagged_by, scheme FROM claims_log " + where +
         "ORDER BY id DESC LIMIT 1000",
         conn, params=params,
     )
@@ -1574,7 +1698,6 @@ def claims_dashboard_page(conn, artifacts):
         return
 
     if is_provider:
-        st.caption("Showing the claims you submitted. Status updates when an auditor reviews a claim.")
         c1, c2, c3, c4, c5 = st.columns(5)
         c1.metric("My claims", len(df))
         c2.metric("Pending review", int((df["review_status"] == "pending").sum()))
@@ -1587,16 +1710,16 @@ def claims_dashboard_page(conn, artifacts):
         c2.metric("High risk", int((df["risk_label"] == "HIGH").sum()))
         c3.metric("Pending review", int((df["review_status"] == "pending").sum()))
 
-    search_col, risk_col, status_col, flag_col = st.columns([2, 1, 1, 1.3])
+    search_col, risk_col, status_col, flag_col, ins_col = st.columns([2, 1, 1, 1.3, 1.3])
     search = search_col.text_input("Search claims (claim ID, patient ID, provider ID)")
     risk_filter = risk_col.selectbox("Risk level", ["All", "HIGH", "MEDIUM", "LOW"])
     status_filter = status_col.selectbox("Status", ["All", "pending", "approved", "rejected", "escalated"])
     flag_filter = flag_col.selectbox(
         "Flagged by",
         ["All", "XGBoost only", "GraphSAGE only", "Both models", "Neither"],
-        help="Which model(s) raised this claim's risk label - surfaces the hybrid "
-             "architecture's actual contribution, not just the final verdict.",
     )
+    df["scheme"] = df["scheme"].fillna("Not specified")
+    ins_filter = ins_col.selectbox("Insurer", ["All"] + sorted(df["scheme"].unique()))
 
     org_names = artifacts.get("organization_names", {})
     org_lookup = artifacts["provider_org_lookup"]
@@ -1636,14 +1759,16 @@ def claims_dashboard_page(conn, artifacts):
         filtered = filtered[filtered["review_status"] == status_filter]
     if flag_filter != "All":
         filtered = filtered[filtered["flag_bucket"] == flag_filter]
+    if ins_filter != "All":
+        filtered = filtered[filtered["scheme"] == ins_filter]
 
-    st.caption(f"{len(filtered)} claim(s). Click a row to open its Claim Detail screen.")
+    st.caption(f"{len(filtered)} claim(s)")
 
     display_df = filtered[[
-        "id", "patient_id", "facility", "primary_condition", "claim_amount_kes",
+        "id", "patient_id", "facility", "scheme", "primary_condition", "claim_amount_kes",
         "fraud_score", "graphsage_score", "risk_label", "flagged_by", "review_status",
     ]].rename(columns={
-        "id": "Claim ID", "patient_id": "Patient", "facility": "Provider",
+        "id": "Claim ID", "patient_id": "Patient", "facility": "Provider", "scheme": "Insurer",
         "primary_condition": "Diagnosis", "claim_amount_kes": "Amount (KES)",
         "fraud_score": "XGBoost score", "graphsage_score": "GraphSAGE score",
         "risk_label": "Risk label", "flagged_by": "Flagged by", "review_status": "Status",
@@ -1693,8 +1818,8 @@ def claim_detail_page(conn, model, artifacts, claim_id, role):
      ratio, score, label, gs_score, flagged_by,
      review_status, reviewed_by, reviewed_at, override_reason) = row
 
-    if role == "provider" and submitted_by != st.session_state.get("username"):
-        st.error("You can only open claims you submitted.")
+    if role == "provider" and provider_id != current_facility(conn):
+        st.error("You can only open claims for your own facility.")
         return
 
     st.header(f"Claim #{cid}")
@@ -1717,6 +1842,8 @@ def claim_detail_page(conn, model, artifacts, claim_id, role):
         st.subheader("Claim details")
         st.write(f"**Claim ID:** {cid}")
         st.write(f"**Patient:** {patient_label}")
+        _sch = conn.execute("SELECT scheme FROM claims_log WHERE id = ?", (cid,)).fetchone()
+        st.write(f"**Insurer:** {(_sch[0] if _sch and _sch[0] else 'Not specified')}")
         st.write(f"**Provider:** {facility}  ·  Provider {provider_id[:8]}")
         st.write(f"**Encounter date:** {service_date}")
         st.write(f"**Diagnosis:** {condition}")
@@ -1756,7 +1883,7 @@ def claim_detail_page(conn, model, artifacts, claim_id, role):
         if gs_score is None and gs_artifacts is not None:
             gs_score = graphsage_ring_score(patient_id, provider_id, gs_artifacts)
             if flagged_by is None:
-                _, flagged_by = hybrid_label(score, gs_score, artifacts, gs_artifacts)
+                _, flagged_by = hybrid_label(score, gs_score, artifacts, gs_artifacts, provider_id)
 
         sc1, sc2, sc3 = st.columns([1, 1, 1.5])
         with sc1:
@@ -1773,11 +1900,7 @@ def claim_detail_page(conn, model, artifacts, claim_id, role):
         if flagged_by:
             st.caption(f"Flagged by: {flagged_by}")
         if gs_score is None:
-            st.caption(
-                "GraphSAGE has no relational score for this claim - the linked patient and/or "
-                "provider has no claim history in the training graph, so there's no repeating "
-                "pattern to measure yet. Verdict above reflects XGBoost's cost-anomaly read alone."
-            )
+            st.caption(gs_missing_note(provider_id))
 
         # Recompute the engineered feature row once here - needed for the
         # anomaly-flag badges below AND for SHAP, so it's done unconditionally
@@ -1804,20 +1927,15 @@ def claim_detail_page(conn, model, artifacts, claim_id, role):
         st.subheader("Relational view (GraphSAGE)")
         nb = load_graph_neighborhood()
         if nb is None or gs_artifacts is None or not patient_id:
-            st.caption("Relational view unavailable - needs a linked patient and the exported "
-                       "graph_neighborhood.json (run export_graph_neighborhood.py).")
+            st.caption("Relational view unavailable for this claim.")
         elif str(patient_id) not in nb["patient_top_providers"] and str(provider_id) not in nb["provider_top_patients"]:
-            st.caption("This patient and provider have no history in the graph yet, so there is "
-                       "no neighbourhood to draw.")
+            st.caption("No graph history for this patient and provider.")
         else:
             dot, n_pat, n_prov, n_edges = build_neighborhood_dot(
                 patient_id, provider_id, nb, gs_artifacts, org_names, org_lookup)
             st.graphviz_chart(dot, use_container_width=True)
             st.caption(
-                f"{n_pat} patients, {n_prov} providers, {n_edges} links (labels = claims between the pair; "
-                "line width scales with claim count). Red links are pairs GraphSAGE itself rates at or above its "
-                "auto-flag threshold - a dense red mesh of the same few patients across several providers is the "
-                "collusion-ring signature. Showing top partners only."
+                f"{n_pat} patients, {n_prov} providers, {n_edges} links. Red = pairs GraphSAGE rates above its flag threshold."
             )
 
         st.subheader("Anomaly flags")
@@ -1830,9 +1948,7 @@ def claim_detail_page(conn, model, artifacts, claim_id, role):
                 report_flags.append("Geographic mismatch - facility outside patient's home county")
             if clinical_flag:
                 report_flags.append("Clinical inconsistency - diagnosis does not fit recorded gender")
-            if not geo_flag and not clinical_flag:
-                st.caption("No geographic or clinical inconsistency flags on this claim.")
-            else:
+            if geo_flag or clinical_flag:
                 fcol1, fcol2 = st.columns(2)
                 if geo_flag:
                     fcol1.warning(
@@ -1846,20 +1962,10 @@ def claim_detail_page(conn, model, artifacts, claim_id, role):
                         "fit this patient's recorded gender.",
                         icon="\U0001FA7A",
                     )
-                st.caption(
-                    "These are always shown when present - independent of whether "
-                    "SHAP ranks them in the top 3 contributing features below."
-                )
 
         st.subheader("Explanation (SHAP)")
         if not SHAP_AVAILABLE:
-            st.caption(
-                "The `shap` package isn't installed in this environment, so the "
-                "per-claim explanation can't be computed right now. Run "
-                "`pip install shap` (in the same terminal you launch this app "
-                "from) and restart the app to enable it - this doesn't affect "
-                "scoring, only this explanation panel."
-            )
+            st.caption("Explanation unavailable (the shap package is not installed).")
         elif feat is None:
             st.caption(f"SHAP explanation unavailable: {feat_error}")
         else:
@@ -1892,10 +1998,6 @@ def claim_detail_page(conn, model, artifacts, claim_id, role):
         # can approve/reject/escalate a claim. This is enforced here, not
         # just by hiding "Submit claim"/"Audit history" from the provider
         # nav, so a provider can't reach this control by any other path.
-        st.caption(
-            "Only an auditor account can approve, reject, or escalate a claim - "
-            "providers can view the outcome here once an auditor has reviewed it."
-        )
         return
 
     override = st.checkbox("Override model verdict")
@@ -1974,12 +2076,11 @@ def analytics_page(conn):
     st.header("Fraud analytics overview")
     df = pd.read_sql_query(
         "SELECT submitted_at, provider_id, fraud_score, risk_label, "
-        "graphsage_score, flagged_by FROM claims_log",
+        "graphsage_score, flagged_by, scheme FROM claims_log",
         conn,
     )
     if df.empty:
-        st.info("No claims scored yet - analytics will populate as claims come in "
-                "through Submit claim / Upload CSV.")
+        st.info("No claims scored yet.")
         return
 
     total = len(df)
@@ -1995,11 +2096,6 @@ def analytics_page(conn):
     st.bar_chart(counts)
 
     st.subheader("What's driving the flags - XGBoost vs GraphSAGE")
-    st.caption(
-        "Who actually raised the alarm on flagged claims (HIGH/MEDIUM only). This is "
-        "the hybrid architecture's real contribution: claims GraphSAGE alone caught "
-        "would have been missed by a cost-anomaly model working on its own."
-    )
 
     def _flag_bucket(reason):
         if not isinstance(reason, str) or not reason:
@@ -2041,6 +2137,14 @@ def analytics_page(conn):
                 "because of the relational (GraphSAGE) score."
             )
 
+    st.subheader("Claims by insurer")
+    ins = df.assign(scheme=df["scheme"].fillna("Not specified"))
+    ins_tbl = (ins.groupby("scheme").agg(Claims=("risk_label", "size"),
+                                        High=("risk_label", lambda x: int((x == "HIGH").sum())))
+               .sort_values("Claims", ascending=False))
+    ins_tbl["High-risk %"] = (ins_tbl["High"] / ins_tbl["Claims"] * 100).round(1)
+    st.dataframe(ins_tbl, use_container_width=True)
+
     st.subheader("Claims scored per day")
     df["date"] = pd.to_datetime(df["submitted_at"]).dt.date
     daily = df.groupby("date").size()
@@ -2069,8 +2173,11 @@ def provider_profile_page(conn, artifacts):
         name = org_names.get(org_id, f"Facility {org_id[:8]}")
         return f"{name}  ·  Provider {pid[:8]}"
 
+    facility = require_facility(conn, artifacts)
+    if facility is False:
+        return
     provider_id = st.selectbox(
-        "Provider", artifacts["top_providers"], format_func=_provider_label
+        "Provider", [facility] if facility else artifacts["top_providers"], format_func=_provider_label
     )
     org_id = org_lookup.get(provider_id, "unknown")
     org_name = org_names.get(org_id, "unknown facility")
@@ -2132,22 +2239,39 @@ def provider_profile_page(conn, artifacts):
 # ============================================================
 # MANAGE USERS (admin only)
 # ============================================================
-def manage_users_page(conn):
+def change_password_page(conn):
+    st.header("Change password")
+    with st.form("change_pw_form", clear_on_submit=True):
+        cur_pw = st.text_input("Current password", type="password")
+        new_pw = st.text_input("New password", type="password")
+        conf_pw = st.text_input("Confirm new password", type="password")
+        go = st.form_submit_button("Change password", type="primary")
+    if go:
+        row = conn.execute("SELECT password_hash, salt FROM users WHERE username = ?",
+                           (st.session_state.get("username"),)).fetchone()
+        if not row or not verify_password(cur_pw, row[0], row[1]):
+            st.error("Current password is incorrect.")
+        elif len(new_pw) < 8:
+            st.error("New password must be at least 8 characters.")
+        elif new_pw != conf_pw:
+            st.error("New passwords don't match.")
+        else:
+            h, salt = hash_password(new_pw)
+            conn.execute("UPDATE users SET password_hash = ?, salt = ? WHERE username = ?",
+                         (h, salt, st.session_state.get("username")))
+            conn.commit()
+            st.success("Password changed.")
+
+
+def manage_users_page(conn, artifacts):
     st.header("Manage users")
-    st.caption("New accounts are saved to the users table in the SQLite database and "
-               "can log in immediately. Role controls which pages an account can see: "
-               "nurse -> register patients only; provider -> submit/upload claims, "
-               "claims dashboard, provider profile (this is the hospital/facility "
-               "staff who generate a claim); auditor -> review claims (approve/"
-               "reject/escalate), audit history, analytics, provider profiles - "
-               "review-only, no submission access, so the same account can't both "
-               "submit and approve a claim. Admin is scoped strictly to provisioning "
-               "accounts (this page only) - it is not a superset with access to "
-               "claims or clinical data.")
+    st.caption("Nurse and provider accounts are tied to one facility. Auditors can review all claims but cannot submit.")
 
     with st.form("add_user_form", clear_on_submit=True):
         new_username = st.text_input("New username")
         new_role = st.selectbox("Role", ROLES, index=0)
+        new_facility = st.selectbox("Facility (required for nurse and provider accounts)", [None] + artifacts["top_providers"],
+                                    format_func=lambda p: "— none —" if p is None else facility_label(artifacts, p))
         new_password = st.text_input("New password", type="password")
         confirm_password = st.text_input("Confirm password", type="password")
         submitted = st.form_submit_button("Add user", type="primary")
@@ -2155,6 +2279,8 @@ def manage_users_page(conn):
     if submitted:
         if not new_username or not new_password:
             st.error("Username and password are both required.")
+        elif new_role in FACILITY_ROLES and not new_facility:
+            st.error("Nurse and provider accounts must be linked to a facility.")
         elif new_password != confirm_password:
             st.error("Passwords don't match.")
         else:
@@ -2166,16 +2292,32 @@ def manage_users_page(conn):
             else:
                 new_hash, new_salt = hash_password(new_password)
                 conn.execute(
-                    "INSERT INTO users (username, password_hash, salt, role) VALUES (?, ?, ?, ?)",
-                    (new_username, new_hash, new_salt, new_role),
+                    "INSERT INTO users (username, password_hash, salt, role, provider_id) VALUES (?, ?, ?, ?, ?)",
+                    (new_username, new_hash, new_salt, new_role, new_facility if new_role in FACILITY_ROLES else None),
                 )
                 conn.commit()
                 st.success(f"User '{new_username}' created with role '{new_role}'. They can log in now.")
 
     st.divider()
     st.subheader("Existing users")
-    users_df = pd.read_sql_query("SELECT username, role FROM users ORDER BY username", conn)
-    st.dataframe(users_df, use_container_width=True)
+    users_df = pd.read_sql_query("SELECT username, role, provider_id FROM users ORDER BY username", conn)
+    show_df = users_df.copy()
+    show_df["facility"] = show_df["provider_id"].map(lambda p: facility_label(artifacts, p) if isinstance(p, str) and p else "")
+    st.dataframe(show_df.drop(columns=["provider_id"]), use_container_width=True)
+
+    st.divider()
+    st.subheader("Assign a facility")
+    prov_users = users_df.loc[users_df["role"].isin(FACILITY_ROLES), "username"].tolist()
+    if prov_users:
+        fa_user = st.selectbox("Nurse or provider account", prov_users, key="fac_user")
+        fa_fac = st.selectbox("Facility", artifacts["top_providers"], format_func=lambda p: facility_label(artifacts, p), key="fac_value")
+        if st.button("Assign facility"):
+            conn.execute("UPDATE users SET provider_id = ? WHERE username = ?", (fa_fac, fa_user))
+            conn.commit()
+            st.success(f"'{fa_user}' is now linked to {facility_label(artifacts, fa_fac)}.")
+            st.rerun()
+    else:
+        st.caption("No nurse or provider accounts yet.")
 
     admin_count = int((users_df["role"] == "admin").sum())
 
@@ -2233,11 +2375,6 @@ def manage_users_page(conn):
 # ============================================================
 def model_health_page(gs_artifacts):
     st.header("Model health")
-    st.caption(
-        "Evaluation and stress-test results from the latest training/validation "
-        "run - regenerated by re-running the training/evaluation scripts, not "
-        "live-computed here."
-    )
 
     health = load_model_health_artifacts()
 
@@ -2247,10 +2384,6 @@ def model_health_page(gs_artifacts):
         c1, c2 = st.columns(2)
         c1.metric("XGBoost auto-flag threshold", f"{t_xgb:.2f}")
         c2.metric("GraphSAGE auto-flag threshold", f"{t_gs:.2f}")
-        st.caption(
-            "Tuned via grid search on the validation split only (never test) to "
-            "maximise F1 - see tune_hybrid_threshold.py."
-        )
     else:
         st.caption("Tuned thresholds file not found - using defaults (0.5 / 0.5).")
 
@@ -2265,11 +2398,6 @@ def model_health_page(gs_artifacts):
             "recall": "Recall", "mean_score": "Mean score",
         })
         st.dataframe(display_recall, use_container_width=True, hide_index=True)
-        st.caption(
-            "This is XGBoost scored alone - the gap on collusion_ring is exactly "
-            "why GraphSAGE exists (see the hybrid breakdown below and on the "
-            "Analytics page)."
-        )
 
     st.divider()
     st.subheader("Hybrid robustness / stress test")
@@ -2277,12 +2405,6 @@ def model_health_page(gs_artifacts):
     if rob_df is None:
         st.caption("hybrid_robustness_results.csv not found - re-run hybrid_robustness_test.py to generate it.")
     else:
-        st.caption(
-            "Each row corrupts a different part of the pipeline (XGBoost's tabular "
-            "features, GraphSAGE's node features, or simulated 'new to the system' "
-            "claims with no graph history) and re-scores the identical held-out "
-            "test set. Compares the tuned hybrid rule against XGBoost alone."
-        )
         summary_cols = [
             "condition", "xgboost_alone_recall", "xgboost_alone_fp_rate",
             "hybrid_tuned_recall", "hybrid_tuned_precision", "hybrid_tuned_f1", "hybrid_tuned_fp_rate",
@@ -2309,13 +2431,6 @@ def model_health_page(gs_artifacts):
             ring_chart = rob_df.set_index("condition")[["recall_collusion_ring_xgb", "recall_collusion_ring_hybrid"]]
             ring_chart.columns = ["XGBoost alone", "Hybrid (tuned)"]
             st.bar_chart(ring_chart)
-            st.caption(
-                "The clean-condition gap here (XGBoost alone ~0.8% vs hybrid 100%) is "
-                "the headline result for this thesis's hybrid architecture. The "
-                "'GraphSAGE node features corrupted: 10%' row shows where that "
-                "advantage is fragile - a known, documented limitation, not something "
-                "papered over."
-            )
 
     st.divider()
     st.subheader("GraphSAGE coverage")
@@ -2325,11 +2440,8 @@ def model_health_page(gs_artifacts):
         c1, c2 = st.columns(2)
         c1.metric("Patients with graph history", gs_artifacts.get("n_patients_with_history", "n/a"))
         c2.metric("Providers with graph history", gs_artifacts.get("n_providers_with_history", "n/a"))
-        st.caption(
-            "A patient or provider outside this coverage gets no relational score - "
-            "the hybrid falls back to XGBoost alone for them, by design (see the "
-            "'Missing GraphSAGE history' rows above for how much recall that costs)."
-        )
+        st.caption("Patients outside this coverage have no patient-level relational score. If their provider sits in a "
+                   "flagged cluster, the claim is routed to manual audit; otherwise XGBoost alone decides.")
 
 
 # ============================================================
@@ -2337,6 +2449,7 @@ def model_health_page(gs_artifacts):
 # ============================================================
 def main():
     conn = get_db()
+    seed_demo_facility_accounts(conn, load_artifacts())
     if not st.session_state.get("logged_in"):
         login_screen(conn)
         return
@@ -2370,6 +2483,7 @@ def main():
         # no clinical/audit pages. It is not a superset of nurse/auditor.
         nav_options += ["Manage users", "Model Health"]
 
+    nav_options.append("Change password")
     page = st.sidebar.radio("Navigate", nav_options)
     if page != "Claims dashboard":
         st.session_state.selected_claim_id = None
@@ -2399,8 +2513,10 @@ def main():
         provider_profile_page(conn, artifacts)
     elif page == "Model Health":
         model_health_page(gs_artifacts)
+    elif page == "Change password":
+        change_password_page(conn)
     else:
-        manage_users_page(conn)
+        manage_users_page(conn, artifacts)
 
 
 if __name__ == "__main__":

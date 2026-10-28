@@ -1,0 +1,16 @@
+PATIENT_ID,PROVIDER_ID,PRIMARY_CONDITION,PATIENT_COUNTY,ENCOUNTER_TYPE,GENDER,SERVICE_DATE,AGE,LENGTH_OF_STAY_HOURS,BASE_COST_KES,CLAIM_AMOUNT_KES,PAYER_COVERAGE_KES,CLAIM_TO_BASE_RATIO
+,a6e163f1-4d67-3e66-9892-fb7b8f34594d,Alzheimer's disease (disorder),Meru,virtual,M,2026-10-16,13,0.9,992.92,2412.8,992.92,2.43
+,a6e163f1-4d67-3e66-9892-fb7b8f34594d,Sore throat (finding),Migori,outpatient,F,2026-10-17,82,1.7,5224.03,5589.71,1619.45,1.07
+,a6e163f1-4d67-3e66-9892-fb7b8f34594d,Bleeding from anus (disorder),Kiambu,home,F,2026-10-06,37,3.7,5479.4,5698.58,4547.9,1.04
+,a6e163f1-4d67-3e66-9892-fb7b8f34594d,Body mass index 30+ - obesity (finding),Nyandarua,urgentcare,M,2026-10-07,68,4.1,4789.08,5507.44,1197.27,1.15
+,a6e163f1-4d67-3e66-9892-fb7b8f34594d,Chronic obstructive bronchitis (disorder),Nyandarua,inpatient,M,2026-10-09,36,38.0,36466.99,40478.36,8752.08,1.11
+,a6e163f1-4d67-3e66-9892-fb7b8f34594d,Acute respiratory failure (disorder),Kilifi,outpatient,M,2026-10-10,44,7.2,5657.49,14370.02,1753.82,2.54
+,a6e163f1-4d67-3e66-9892-fb7b8f34594d,Sputum finding (finding),Murang'a,ambulatory,F,2026-10-07,52,9.3,2379.75,2427.35,2379.75,1.02
+,a6e163f1-4d67-3e66-9892-fb7b8f34594d,Hypertriglyceridemia (disorder),Kakamega,outpatient,M,2026-10-18,48,6.2,5438.44,13541.72,1685.92,2.49
+,a6e163f1-4d67-3e66-9892-fb7b8f34594d,Osteoporosis (disorder),Kericho,virtual,F,2026-10-18,82,0.5,1038.92,1215.54,1038.92,1.17
+,a6e163f1-4d67-3e66-9892-fb7b8f34594d,Anemia (disorder),Kajiado,outpatient,M,2026-10-13,60,5.1,4775.34,5443.89,1480.36,1.14
+,a6e163f1-4d67-3e66-9892-fb7b8f34594d,Suspected prostate cancer (situation),Kakamega,urgentcare,F,2026-10-12,24,3.6,5565.31,6233.15,1391.33,1.12
+,a6e163f1-4d67-3e66-9892-fb7b8f34594d,Acute allergic reaction (disorder),Bungoma,virtual,F,2026-10-06,53,0.8,997.85,1117.59,997.85,1.12
+,a6e163f1-4d67-3e66-9892-fb7b8f34594d,Macular edema and retinopathy due to type 2 diabetes mellitus (disorder),Kajiado,inpatient,F,2026-10-02,71,134.0,50087.06,58100.99,12020.89,1.16
+,a6e163f1-4d67-3e66-9892-fb7b8f34594d,Opioid abuse,Kericho,wellness,F,2026-10-17,2,1.7,1461.06,1724.05,1461.06,1.18
+,a6e163f1-4d67-3e66-9892-fb7b8f34594d,Septic shock (disorder),Kiambu,inpatient,F,2026-10-05,31,139.0,50628.92,52654.08,12150.94,1.04

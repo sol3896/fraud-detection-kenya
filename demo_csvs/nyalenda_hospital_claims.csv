@@ -1,0 +1,16 @@
+PATIENT_ID,PROVIDER_ID,PRIMARY_CONDITION,PATIENT_COUNTY,ENCOUNTER_TYPE,GENDER,SERVICE_DATE,AGE,LENGTH_OF_STAY_HOURS,BASE_COST_KES,CLAIM_AMOUNT_KES,PAYER_COVERAGE_KES,CLAIM_TO_BASE_RATIO
+,cdb628b5-26f1-303d-a3f8-d17089034fc4,Body mass index 40+ - severely obese (finding),Siaya,urgentcare,M,2026-10-05,50,1.1,5063.42,12000.31,1265.86,2.37
+,cdb628b5-26f1-303d-a3f8-d17089034fc4,Osteoarthritis of knee (disorder),Kilifi,ambulatory,F,2026-10-06,81,8.3,2405.41,5147.58,2405.41,2.14
+,cdb628b5-26f1-303d-a3f8-d17089034fc4,Reports of violence in the environment (finding),Uasin Gishu,outpatient,F,2026-10-01,68,5.2,5045.0,5499.05,1563.95,1.09
+,cdb628b5-26f1-303d-a3f8-d17089034fc4,Pre-eclampsia (disorder),Homa Bay,urgentcare,M,2026-10-09,53,3.6,5345.9,5880.49,1336.47,1.1
+,cdb628b5-26f1-303d-a3f8-d17089034fc4,Gingivitis (disorder),Kilifi,home,M,2026-10-01,9,4.0,5874.24,6696.63,4875.62,1.14
+,cdb628b5-26f1-303d-a3f8-d17089034fc4,Homeless (finding),Homa Bay,emergency,F,2026-10-03,27,2.1,17477.34,43693.35,17477.34,2.5
+,cdb628b5-26f1-303d-a3f8-d17089034fc4,Lack of access to transportation (finding),Nyandarua,wellness,F,2026-10-06,66,2.7,1607.06,1864.19,1607.06,1.16
+,cdb628b5-26f1-303d-a3f8-d17089034fc4,Atrial fibrillation (disorder),Bungoma,ambulatory,F,2026-10-07,57,5.9,2677.19,3025.22,2677.19,1.13
+,cdb628b5-26f1-303d-a3f8-d17089034fc4,Fractured dental filling (finding),Kakamega,wellness,F,2026-10-18,82,2.3,1587.89,1619.65,1587.89,1.02
+,cdb628b5-26f1-303d-a3f8-d17089034fc4,Chronic obstructive bronchitis (disorder),Nairobi,outpatient,F,2026-10-05,54,4.3,5138.42,5857.8,1592.91,1.14
+,cdb628b5-26f1-303d-a3f8-d17089034fc4,Neoplasm of prostate (disorder),Kiambu,wellness,M,2026-10-11,12,1.8,1562.67,1687.68,1562.67,1.08
+,cdb628b5-26f1-303d-a3f8-d17089034fc4,Acute bacterial sinusitis (disorder),Bomet,outpatient,F,2026-10-07,7,3.8,5509.12,5949.85,1707.83,1.08
+,cdb628b5-26f1-303d-a3f8-d17089034fc4,Epilepsy (disorder),Siaya,virtual,M,2026-10-01,27,0.6,995.96,1035.8,995.96,1.04
+,cdb628b5-26f1-303d-a3f8-d17089034fc4,Acute deep venous thrombosis (disorder),Nairobi,outpatient,M,2026-10-15,76,1.4,4832.79,5074.43,1498.16,1.05
+,cdb628b5-26f1-303d-a3f8-d17089034fc4,Blindness due to type 2 diabetes mellitus (disorder),Kakamega,emergency,F,2026-10-04,2,6.0,18687.14,21490.21,18687.14,1.15

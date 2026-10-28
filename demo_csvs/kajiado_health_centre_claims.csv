@@ -1,0 +1,21 @@
+PATIENT_ID,PROVIDER_ID,PRIMARY_CONDITION,PATIENT_COUNTY,ENCOUNTER_TYPE,GENDER,SERVICE_DATE,AGE,LENGTH_OF_STAY_HOURS,BASE_COST_KES,CLAIM_AMOUNT_KES,PAYER_COVERAGE_KES,CLAIM_TO_BASE_RATIO
+,4ff14d96-8ce6-3457-ad14-a76003b1ff24,History of amputation of foot (situation),Nyeri,virtual,M,2026-10-17,73,0.5,963.13,1020.92,963.13,1.06
+,4ff14d96-8ce6-3457-ad14-a76003b1ff24,Hyperlipidemia (disorder),Nyandarua,outpatient,F,2026-10-07,83,5.3,5398.05,5667.95,1673.4,1.05
+RING-PATIENT-171,4ff14d96-8ce6-3457-ad14-a76003b1ff24,No condition recorded,Kericho,ambulatory,F,2024-12-30,71,8.456944444444444,3106.7,3362.89,3176.5,1.082
+,4ff14d96-8ce6-3457-ad14-a76003b1ff24,Bleeding from anus (disorder),Nyandarua,ambulatory,M,2026-10-17,80,11.5,2617.14,2748.0,2617.14,1.05
+RING-PATIENT-277,4ff14d96-8ce6-3457-ad14-a76003b1ff24,Perennial allergic rhinitis with seasonal variation (disorder),Nakuru,ambulatory,M,2016-06-28,14,8.7,2579.3,2658.06,2438.14,1.031
+,4ff14d96-8ce6-3457-ad14-a76003b1ff24,Chronic paralysis due to lesion of spinal cord (disorder),Bungoma,urgentcare,F,2026-10-01,35,5.8,5202.24,12433.35,1300.56,2.39
+,4ff14d96-8ce6-3457-ad14-a76003b1ff24,Transformed migraine (disorder),Bungoma,outpatient,M,2026-10-17,20,1.4,5066.64,5167.97,1570.66,1.02
+,4ff14d96-8ce6-3457-ad14-a76003b1ff24,Only received primary school education (finding),Kisumu,outpatient,M,2026-10-12,68,3.5,4780.83,5163.3,1482.06,1.08
+,4ff14d96-8ce6-3457-ad14-a76003b1ff24,Passive conjunctival congestion (finding),Kericho,emergency,M,2026-10-13,7,2.3,18031.91,20195.74,18031.91,1.12
+RING-PATIENT-081,4ff14d96-8ce6-3457-ad14-a76003b1ff24,No condition recorded,Migori,ambulatory,F,2018-08-06,65,22.280277777777776,2913.13,3772.98,3720.55,1.295
+,4ff14d96-8ce6-3457-ad14-a76003b1ff24,Mitral valve stenosis (disorder),Kisumu,emergency,F,2026-10-03,21,7.1,17521.85,36095.01,17521.85,2.06
+RING-PATIENT-053,4ff14d96-8ce6-3457-ad14-a76003b1ff24,No condition recorded,Bungoma,ambulatory,F,2022-06-27,33,20.98,2418.77,2592.34,2557.53,1.072
+,4ff14d96-8ce6-3457-ad14-a76003b1ff24,Proliferative diabetic retinopathy due to type II diabetes mellitus,Siaya,inpatient,F,2026-10-09,31,92.0,41123.74,47292.3,9869.7,1.15
+RING-PATIENT-136,4ff14d96-8ce6-3457-ad14-a76003b1ff24,No condition recorded,Kericho,ambulatory,M,2019-03-28,45,4.6175,3192.86,4149.86,3896.95,1.3
+,4ff14d96-8ce6-3457-ad14-a76003b1ff24,Smokes tobacco daily (finding),Nairobi,emergency,F,2026-10-08,78,13.7,16223.48,17845.83,16223.48,1.1
+,4ff14d96-8ce6-3457-ad14-a76003b1ff24,Gout,Homa Bay,inpatient,F,2026-10-14,62,120.0,44312.83,50516.63,10635.08,1.14
+,4ff14d96-8ce6-3457-ad14-a76003b1ff24,History of artificial joint (situation),Kiambu,home,M,2026-10-11,64,1.7,6029.64,13807.88,5004.6,2.29
+,4ff14d96-8ce6-3457-ad14-a76003b1ff24,Obstructive sleep apnea syndrome (disorder),Bungoma,wellness,M,2026-10-16,54,2.9,1606.7,1783.44,1606.7,1.11
+,4ff14d96-8ce6-3457-ad14-a76003b1ff24,Obstructive sleep apnea syndrome (disorder),Bungoma,outpatient,M,2026-10-06,50,5.5,5470.94,5580.36,1695.99,1.02
+,4ff14d96-8ce6-3457-ad14-a76003b1ff24,Febrile neutropenia (disorder),Nakuru,emergency,M,2026-10-18,37,8.3,17434.59,18655.01,17434.59,1.07

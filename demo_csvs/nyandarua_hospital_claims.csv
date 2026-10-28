@@ -1,0 +1,21 @@
+PATIENT_ID,PROVIDER_ID,PRIMARY_CONDITION,PATIENT_COUNTY,ENCOUNTER_TYPE,GENDER,SERVICE_DATE,AGE,LENGTH_OF_STAY_HOURS,BASE_COST_KES,CLAIM_AMOUNT_KES,PAYER_COVERAGE_KES,CLAIM_TO_BASE_RATIO
+,229f48e5-4ef0-3883-8c18-56121e961b75,Spina bifida occulta (disorder),Migori,outpatient,F,2026-10-13,12,6.0,5579.59,6025.96,1729.67,1.08
+,229f48e5-4ef0-3883-8c18-56121e961b75,Urinary tract infectious disease (disorder),Meru,home,F,2026-10-01,82,1.3,5039.84,5795.82,4183.07,1.15
+,229f48e5-4ef0-3883-8c18-56121e961b75,Seasonal allergic rhinitis (disorder),Nairobi,ambulatory,M,2026-10-01,29,10.4,2531.39,2632.65,2531.39,1.04
+,229f48e5-4ef0-3883-8c18-56121e961b75,Preinfarction syndrome (disorder),Kakamega,wellness,M,2026-10-16,69,1.8,1451.34,1727.09,1451.34,1.19
+RING-PATIENT-079,229f48e5-4ef0-3883-8c18-56121e961b75,Gingival disease (disorder),Kisumu,ambulatory,M,2023-06-17,71,6.203333333333333,1159.93,1344.44,1322.2,1.159
+RING-PATIENT-068,229f48e5-4ef0-3883-8c18-56121e961b75,No condition recorded,Kericho,ambulatory,F,2018-06-02,85,23.75055555555556,3839.7,4067.77,3724.42,1.059
+,229f48e5-4ef0-3883-8c18-56121e961b75,Primary fibromyalgia syndrome (disorder),Kericho,ambulatory,M,2026-10-07,50,4.5,2331.13,5548.09,2331.13,2.38
+,229f48e5-4ef0-3883-8c18-56121e961b75,Has a criminal record (finding),Machakos,outpatient,F,2026-10-08,46,5.9,5146.6,5918.59,1595.45,1.15
+,229f48e5-4ef0-3883-8c18-56121e961b75,Obstructive sleep apnea syndrome (disorder),Kisumu,inpatient,M,2026-10-17,40,95.0,38811.04,42304.03,9314.65,1.09
+RING-PATIENT-045,229f48e5-4ef0-3883-8c18-56121e961b75,No condition recorded,Kiambu,outpatient,F,1983-11-17,39,14.740277777777775,4121.13,5304.46,1500.0,1.287
+RING-PATIENT-286,229f48e5-4ef0-3883-8c18-56121e961b75,Gingival disease (disorder),Murang'a,ambulatory,F,2022-06-25,67,25.97583333333333,4943.95,6241.31,5978.67,1.262
+RING-PATIENT-293,229f48e5-4ef0-3883-8c18-56121e961b75,No condition recorded,Nyandarua,ambulatory,M,1986-02-01,52,20.670277777777777,2433.52,3102.43,2869.91,1.275
+,229f48e5-4ef0-3883-8c18-56121e961b75,Pulmonic valve regurgitation (disorder),Bomet,wellness,F,2026-10-14,54,2.9,1542.08,3562.2,1542.08,2.31
+,229f48e5-4ef0-3883-8c18-56121e961b75,Acute bronchitis (disorder),Murang'a,home,F,2026-10-18,40,1.2,5124.55,5432.02,4253.38,1.06
+,229f48e5-4ef0-3883-8c18-56121e961b75,Pulmonic valve stenosis (disorder),Kilifi,ambulatory,M,2026-10-17,44,3.0,2658.13,2870.78,2658.13,1.08
+,229f48e5-4ef0-3883-8c18-56121e961b75,Gunshot wound (disorder),Homa Bay,virtual,F,2026-10-14,73,0.8,1028.31,1120.86,1028.31,1.09
+,229f48e5-4ef0-3883-8c18-56121e961b75,Loose dental filling (finding),Machakos,virtual,F,2026-10-10,83,0.8,966.27,2444.66,966.27,2.53
+,229f48e5-4ef0-3883-8c18-56121e961b75,Acute ST segment elevation myocardial infarction (disorder),Homa Bay,wellness,M,2026-10-07,85,2.6,1489.05,1727.3,1489.05,1.16
+,229f48e5-4ef0-3883-8c18-56121e961b75,Sinusitis (disorder),Kiambu,inpatient,M,2026-10-13,70,43.0,34706.64,38871.44,8329.59,1.12
+,229f48e5-4ef0-3883-8c18-56121e961b75,Unhealthy alcohol drinking behavior (finding),Nyandarua,wellness,F,2026-10-03,47,1.6,1469.88,1749.16,1469.88,1.19

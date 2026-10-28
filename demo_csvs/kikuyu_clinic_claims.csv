@@ -1,0 +1,16 @@
+PATIENT_ID,PROVIDER_ID,PRIMARY_CONDITION,PATIENT_COUNTY,ENCOUNTER_TYPE,GENDER,SERVICE_DATE,AGE,LENGTH_OF_STAY_HOURS,BASE_COST_KES,CLAIM_AMOUNT_KES,PAYER_COVERAGE_KES,CLAIM_TO_BASE_RATIO
+,2007f83e-4486-3e6f-adef-f7ee06765edc,Epilepsy (disorder),Siaya,urgentcare,M,2026-10-07,53,2.5,4826.8,5357.75,1206.7,1.11
+,2007f83e-4486-3e6f-adef-f7ee06765edc,Sepsis (disorder),Kisumu,home,M,2026-10-01,28,1.2,5434.99,6032.84,4511.04,1.11
+,2007f83e-4486-3e6f-adef-f7ee06765edc,Pneumonia (disorder),Kiambu,home,F,2026-10-04,28,3.4,5988.68,6527.66,4970.6,1.09
+,2007f83e-4486-3e6f-adef-f7ee06765edc,Chronic kidney disease stage 1 (disorder),Nyandarua,home,M,2026-10-10,49,2.7,5864.28,6509.35,4867.35,1.11
+,2007f83e-4486-3e6f-adef-f7ee06765edc,Primary fibromyalgia syndrome (disorder),Kakamega,outpatient,M,2026-10-05,67,4.0,4672.97,5187.0,1448.62,1.11
+,2007f83e-4486-3e6f-adef-f7ee06765edc,Social isolation (finding),Nakuru,urgentcare,M,2026-10-04,25,3.4,4812.05,10875.23,1203.01,2.26
+,2007f83e-4486-3e6f-adef-f7ee06765edc,Anemia (disorder),Kiambu,outpatient,F,2026-10-16,33,5.4,5311.76,6161.64,1646.65,1.16
+,2007f83e-4486-3e6f-adef-f7ee06765edc,Rupture of appendix (disorder),Kericho,home,M,2026-10-08,12,3.1,5522.47,6185.17,4583.65,1.12
+,2007f83e-4486-3e6f-adef-f7ee06765edc,Mitral valve regurgitation (disorder),Nairobi,outpatient,M,2026-10-13,35,4.4,5348.79,10911.53,1658.12,2.04
+,2007f83e-4486-3e6f-adef-f7ee06765edc,Mitral valve regurgitation (disorder),Bungoma,home,M,2026-10-18,73,1.3,4955.43,11050.61,4113.01,2.23
+,2007f83e-4486-3e6f-adef-f7ee06765edc,Acute myeloid leukemia (disorder),Kericho,ambulatory,F,2026-10-09,45,9.1,2627.53,2916.56,2627.53,1.11
+,2007f83e-4486-3e6f-adef-f7ee06765edc,Leaking dental filling (finding),Kiambu,virtual,F,2026-10-13,71,1.0,1057.01,1088.72,1057.01,1.03
+,2007f83e-4486-3e6f-adef-f7ee06765edc,Diabetes mellitus type 2 (disorder),Kakamega,virtual,F,2026-10-04,58,0.7,915.8,1071.49,915.8,1.17
+,2007f83e-4486-3e6f-adef-f7ee06765edc,Malignant neoplasm of breast (disorder),Siaya,home,F,2026-10-08,57,3.5,5708.31,6792.89,4737.9,1.19
+,2007f83e-4486-3e6f-adef-f7ee06765edc,Mitral valve regurgitation (disorder),Meru,urgentcare,M,2026-10-01,45,5.5,5699.71,6839.65,1424.93,1.2

@@ -1,0 +1,16 @@
+PATIENT_ID,PROVIDER_ID,PRIMARY_CONDITION,PATIENT_COUNTY,ENCOUNTER_TYPE,GENDER,SERVICE_DATE,AGE,LENGTH_OF_STAY_HOURS,BASE_COST_KES,CLAIM_AMOUNT_KES,PAYER_COVERAGE_KES,CLAIM_TO_BASE_RATIO
+,e73a1d3b-6273-3af1-8906-65a415d668ff,Sleep disorder (disorder),Kiambu,inpatient,F,2026-10-13,29,110.0,41425.23,98592.05,9942.06,2.38
+,e73a1d3b-6273-3af1-8906-65a415d668ff,Cerebrovascular accident (disorder),Nairobi,inpatient,M,2026-10-17,75,135.0,51403.03,52431.09,12336.73,1.02
+,e73a1d3b-6273-3af1-8906-65a415d668ff,Sinusitis (disorder),Meru,outpatient,M,2026-10-03,61,7.3,5396.3,6151.78,1672.85,1.14
+,e73a1d3b-6273-3af1-8906-65a415d668ff,Dyspnea (finding),Murang'a,outpatient,M,2026-10-13,75,5.3,4719.44,5332.97,1463.03,1.13
+,e73a1d3b-6273-3af1-8906-65a415d668ff,Unhealthy alcohol drinking behavior (finding),Bungoma,inpatient,F,2026-10-09,22,70.0,34184.46,75547.66,8204.27,2.21
+,e73a1d3b-6273-3af1-8906-65a415d668ff,Disease caused by severe acute respiratory syndrome coronavirus 2 (disorder),Bungoma,urgentcare,F,2026-10-06,37,4.7,4751.92,5132.07,1187.98,1.08
+,e73a1d3b-6273-3af1-8906-65a415d668ff,Impacted molars (disorder),Mombasa,outpatient,M,2026-10-11,80,4.2,4920.33,10480.3,1525.3,2.13
+,e73a1d3b-6273-3af1-8906-65a415d668ff,Malignant neoplasm of colon (disorder),Uasin Gishu,outpatient,M,2026-10-09,2,4.4,4874.02,5556.38,1510.95,1.14
+,e73a1d3b-6273-3af1-8906-65a415d668ff,Chronic kidney disease stage 2 (disorder),Meru,inpatient,M,2026-10-16,31,94.0,41673.65,43340.6,10001.68,1.04
+,e73a1d3b-6273-3af1-8906-65a415d668ff,Risk activity involvement (finding),Nyandarua,wellness,F,2026-10-10,77,1.9,1601.51,1633.54,1601.51,1.02
+,e73a1d3b-6273-3af1-8906-65a415d668ff,History of autologous bone marrow transplant (situation),Machakos,ambulatory,F,2026-10-01,77,7.9,2711.79,2955.85,2711.79,1.09
+,e73a1d3b-6273-3af1-8906-65a415d668ff,Victim of intimate partner abuse (finding),Uasin Gishu,urgentcare,M,2026-10-10,67,4.7,5087.28,5494.26,1271.82,1.08
+,e73a1d3b-6273-3af1-8906-65a415d668ff,Loss of teeth (disorder),Nyeri,ambulatory,F,2026-10-09,28,11.3,2738.59,2820.75,2738.59,1.03
+,e73a1d3b-6273-3af1-8906-65a415d668ff,Alzheimer's disease (disorder),Homa Bay,outpatient,M,2026-10-18,48,4.4,5389.51,5712.88,1670.75,1.06
+,e73a1d3b-6273-3af1-8906-65a415d668ff,Transport problem (finding),Nakuru,outpatient,F,2026-10-13,49,7.1,5066.63,5877.29,1570.66,1.16

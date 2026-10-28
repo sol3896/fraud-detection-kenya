@@ -121,9 +121,19 @@ DEFAULT_BUNDLES = {
 BENEFIT_RATE = {"ambulatory": 1.0, "emergency": 1.0, "home": 0.83, "hospice": 0.84, "inpatient": 0.24,
                 "outpatient": 0.31, "snf": 0.85, "urgentcare": 0.25, "virtual": 1.0, "wellness": 1.0}
 
-# Scheme multipliers on that rate. Illustrative only.
-SCHEMES = {"SHA (Social Health Authority)": 1.0, "Private insurer - comprehensive": 1.0,
-           "Private insurer - basic": 0.8}
+# Payers a patient can be registered under. SHA is the public scheme; the rest are
+# private medical insurers licensed in Kenya (names from published market lists).
+# The multipliers (share of the SHA-style benefit rate each pays) are ILLUSTRATIVE
+# plan-generosity assumptions, NOT the insurers' real benefit rules.
+INSURER_FACTORS = {
+    "Jubilee Health": 1.0, "AAR Insurance": 1.0, "Britam": 1.0, "UAP Old Mutual": 1.0,
+    "CIC Insurance": 0.9, "APA Insurance": 0.9, "Madison Insurance": 0.9, "Sanlam Kenya": 0.9,
+    "GA Insurance": 0.8, "Heritage Insurance": 0.8, "First Assurance": 0.8, "ICEA Lion": 0.8,
+}
+SCHEME_CHOICES = ["SHA (Social Health Authority)"] + list(INSURER_FACTORS)
+# Older patient records may carry these two generic labels, so keep them resolvable.
+SCHEMES = {"SHA (Social Health Authority)": 1.0, **INSURER_FACTORS,
+           "Private insurer - comprehensive": 1.0, "Private insurer - basic": 0.8}
 DEFAULT_SCHEME = "SHA (Social Health Authority)"
 
 
