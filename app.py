@@ -58,7 +58,8 @@ MODEL_PATH = f"{BASE_DIR}/output/model/xgboost_fraud_model_v2_robust.json"
 ARTIFACTS_PATH = f"{BASE_DIR}/output/model/dashboard_artifacts.json"
 GRAPHSAGE_ARTIFACTS_PATH = f"{BASE_DIR}/output/model/graphsage_artifacts.json"
 GRAPH_NEIGHBORHOOD_PATH = f"{BASE_DIR}/output/model/graph_neighborhood.json"
-DB_PATH = f"{BASE_DIR}/output/model/claims_dashboard_v2.db"
+# FRAUD_DB_PATH lets the automated tests run against a throw-away database.
+DB_PATH = os.environ.get("FRAUD_DB_PATH", f"{BASE_DIR}/output/model/claims_dashboard_v2.db")
 PER_FRAUDTYPE_RECALL_PATH = f"{BASE_DIR}/output/model/per_fraudtype_recall_v2data.csv"
 HYBRID_ROBUSTNESS_PATH = f"{BASE_DIR}/output/model/hybrid_robustness_results.csv"
 HYBRID_THRESHOLDS_PATH = f"{BASE_DIR}/output/model/hybrid_tuned_thresholds.txt"
@@ -151,6 +152,22 @@ def inject_theme(dark: bool = False):
         h1, h2, h3 {{ color: {c['heading']}; font-weight: 700; }}
         p, span, label, .stMarkdown, .stCaption {{ color: {c['text']}; }}
 
+        /* ---- One type scale for the whole app. Size signals importance, so only
+           page titles and the key numbers are larger than body text.
+           page title 1.5rem  |  section 1.1rem  |  body 0.95rem  |  caption 0.8rem  |  metric value 1.4rem ---- */
+        .stApp h1, .stApp h2 {{ font-size: 1.5rem !important; line-height: 1.3 !important; font-weight: 700 !important; }}
+        .stApp h3 {{ font-size: 1.1rem !important; line-height: 1.35 !important; font-weight: 600 !important; }}
+        .stApp h4, .stApp h5, .stApp h6 {{ font-size: 1rem !important; font-weight: 600 !important; }}
+        [data-testid="stSidebar"] h1 {{ font-size: 1.15rem !important; }}
+        .stApp p, .stApp li, .stApp label {{ font-size: 0.95rem; }}
+        [data-testid="stCaptionContainer"], [data-testid="stCaptionContainer"] p {{
+            font-size: 0.8rem !important; color: {c['muted']} !important; }}
+        [data-testid="stMetricLabel"], [data-testid="stMetricLabel"] p {{ font-size: 0.8rem !important; }}
+        [data-testid="stMetricValue"], [data-testid="stMetricValue"] div {{
+            font-size: 1.4rem !important; font-weight: 600 !important; }}
+        /* Hide the Streamlit "Deploy" button (top right) */
+        [data-testid="stAppDeployButton"], .stAppDeployButton, .stDeployButton {{ display: none !important; }}
+
         /* Page background - targets stApp/stAppViewContainer AND the newer
            stMain/stMainBlockContainer wrappers Streamlit added in later
            versions, so the canvas paints correctly across versions instead
@@ -228,6 +245,24 @@ def inject_theme(dark: bool = False):
         }}
         [data-testid="stSidebar"] hr {{ border-color: rgba(255,255,255,0.15); }}
 
+        /* Unread counters on the navigation items, styled like the notification
+           badge on a phone app icon. The blanket sidebar "span" colour rule above
+           would otherwise wash out Streamlit's own badge styling, so every
+           property is set explicitly here and marked important. */
+        [data-testid="stSidebar"] span.stMarkdownBadge {{
+            background-color: #E8322D !important;
+            color: #FFFFFF !important;
+            border-radius: 999px !important;
+            padding: 0.05rem 0.42rem !important;
+            margin-left: 0.2rem !important;
+            min-width: 1.3rem !important;
+            font-size: 0.75rem !important;
+            font-weight: 700 !important;
+            line-height: 1.2rem !important;
+            text-align: center !important;
+            display: inline-block !important;
+        }}
+
         /* Sidebar buttons: explicit light-on-dark "ghost button" style so
            they're always visible against the dark sidebar background,
            regardless of light/dark mode. */
@@ -254,18 +289,21 @@ def inject_theme(dark: bool = False):
            to the accent color so they switch with the toggle. Without this
            they'd fall back to config.toml's static primaryColor, which never
            changes for dark mode. */
-        .stButton button[kind="primary"],
-        .stButton [data-testid="baseButton-primary"],
-        [data-testid="stFormSubmitButton"] button[kind="primary"],
-        [data-testid="stFormSubmitButton"] [data-testid="baseButton-primary"] {{
+        .stButton button[kind^="primary"],
+        [data-testid="stFormSubmitButton"] button[kind^="primary"],
+        button[data-testid^="stBaseButton-primary"],
+        .stButton [data-testid="baseButton-primary"] {{
             background-color: {c['accent']} !important;
             border-color: {c['accent']} !important;
             color: {'#0B132B' if dark else '#FFFFFF'} !important;
         }}
-        .stButton button[kind="primary"]:hover,
-        .stButton [data-testid="baseButton-primary"]:hover,
-        [data-testid="stFormSubmitButton"] button[kind="primary"]:hover,
-        [data-testid="stFormSubmitButton"] [data-testid="baseButton-primary"]:hover {{
+        .stButton button[kind^="primary"] *,
+        [data-testid="stFormSubmitButton"] button[kind^="primary"] *,
+        button[data-testid^="stBaseButton-primary"] * {{
+            color: {'#0B132B' if dark else '#FFFFFF'} !important;
+        }}
+        .stButton button[kind^="primary"]:hover,
+        button[data-testid^="stBaseButton-primary"]:hover {{
             filter: brightness(1.1);
         }}
         /* Links and other accent-colored text */
@@ -494,6 +532,25 @@ def get_db():
             encounter_id INTEGER NOT NULL,
             item TEXT,
             qty REAL
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS encounter_departments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            encounter_id INTEGER NOT NULL,
+            department TEXT,
+            start_datetime TEXT,
+            end_datetime TEXT
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS claim_departments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            claim_id INTEGER NOT NULL,
+            department TEXT,
+            start_datetime TEXT,
+            end_datetime TEXT,
+            hours REAL
         )
     """)
     conn.execute("""
@@ -906,7 +963,8 @@ def log_event(conn, claim_id, actor, event_type, detail):
     conn.commit()
 
 
-def build_claim_report(cid, fields: dict, scores: dict, flags: list, shap_lines: list, events: list, items=None) -> str:
+def build_claim_report(cid, fields: dict, scores: dict, flags: list, shap_lines: list, events: list, items=None,
+                       departments=None) -> str:
     """Plain-text case file for one claim - for an auditor to attach to a
     referral. Built only from data already shown on screen."""
     out = [f"CLAIM REPORT - Claim #{cid}",
@@ -915,6 +973,12 @@ def build_claim_report(cid, fields: dict, scores: dict, flags: list, shap_lines:
     if items:
         out += ["", "ITEMISED BILL (item | qty | tariff | billed)"]
         out += [f"  {c} | {i} | {q:g} | {t:,.0f} | {b:,.0f}" for c, i, q, t, b in items]
+    if departments is not None:
+        out += ["", "TIME IN EACH DEPARTMENT (department | from | to | hours)"]
+        if departments.empty:
+            out += ["  no department log recorded"]
+        else:
+            out += [f"  {r.Department} | {r.From} | {r.To} | {r.Hours:.2f}" for r in departments.itertuples()]
     out += ["", "MODEL SCORES"]
     out += [f"  {k}: {v}" for k, v in scores.items()]
     out += ["", "ANOMALY FLAGS"] + ([f"  - {f}" for f in flags] or ["  none"])
@@ -936,17 +1000,17 @@ def login_screen(conn):
     col_l, col_mid, col_r = st.columns([1, 1.3, 1])
     with col_mid:
         st.markdown(
-            "<div style='text-align:center; font-size:2.6rem; margin-bottom:0.2rem;'>"
+            "<div style='text-align:center; font-size:1.5rem; margin-bottom:0.2rem;'>"
             "\U0001F6E1️</div>",
             unsafe_allow_html=True,
         )
         st.markdown(
-            "<h1 style='text-align:center; font-size:1.6rem; margin-bottom:0.2rem;'>"
+            "<h1 style='text-align:center; margin-bottom:0.2rem;'>"
             "Kenya Health Claim Fraud Detection</h1>",
             unsafe_allow_html=True,
         )
         st.markdown(
-            "<p style='text-align:center; color:#5B7285; margin-bottom:1.6rem;'>"
+            "<p style='text-align:center; color:#5B7285; font-size:0.85rem; margin-bottom:1.6rem;'>"
             "An Explainable Healthcare Claim Fraud Detection System for "
             "Kenyan Insurance Companies</p>",
             unsafe_allow_html=True,
@@ -971,6 +1035,7 @@ def login_screen(conn):
                     )
                     conn.commit()
                 st.session_state.logged_in = True
+                st.session_state.live_seen = None
                 st.session_state.username = username
                 st.session_state.role = row[2]
                 st.rerun()
@@ -1139,6 +1204,94 @@ def encounter_time_inputs(encounter_type, key, start_default=None, end_default=N
     return start_dt, end_dt, los
 
 
+DEPARTMENTS = ["Registration", "Triage", "Consultation", "Laboratory", "Radiology", "Pharmacy",
+               "Theatre", "Ward", "Emergency", "Physiotherapy"]
+# Suggested flow per encounter type: (department, minutes). Staff edit it to the real times.
+DEFAULT_DEPT_FLOW = {
+    "outpatient": [("Triage", 15), ("Consultation", 30), ("Laboratory", 30), ("Pharmacy", 15)],
+    "ambulatory": [("Triage", 15), ("Consultation", 30), ("Laboratory", 30), ("Pharmacy", 15)],
+    "urgentcare": [("Triage", 10), ("Consultation", 30), ("Pharmacy", 10)],
+    "emergency": [("Triage", 10), ("Emergency", 120), ("Laboratory", 45), ("Radiology", 40)],
+    "inpatient": [("Triage", 15), ("Consultation", 30), ("Laboratory", 45)],
+    "virtual": [("Consultation", 30)],
+    "wellness": [("Registration", 10), ("Triage", 15), ("Consultation", 20), ("Laboratory", 20)],
+    "home": [("Consultation", 45)],
+}
+WARD_TYPES = ("inpatient", "snf", "hospice")
+
+
+def default_department_rows(encounter_type, start_dt, end_dt):
+    rows, t = [], start_dt
+    for dept, minutes in DEFAULT_DEPT_FLOW.get(encounter_type, []):
+        e = min(t + dt.timedelta(minutes=minutes), end_dt)
+        if e > t:
+            rows.append((dept, t, e))
+            t = e
+    if encounter_type in WARD_TYPES and end_dt > t:
+        rows.append(("Ward", t, end_dt))
+    return rows
+
+
+def check_departments(editor_df, start_dt, end_dt):
+    """Validate the department log. Returns (rows sorted by start, list of error strings)."""
+    rows, errors = [], []
+    for _, r in editor_df.iterrows():
+        d, s_, e_ = r.get("Department"), r.get("Start"), r.get("End")
+        if not isinstance(d, str) or pd.isna(s_) or pd.isna(e_):
+            continue
+        s_, e_ = pd.Timestamp(s_).to_pydatetime(), pd.Timestamp(e_).to_pydatetime()
+        if e_ <= s_:
+            errors.append(f"{d}: end must be after start.")
+        elif s_ < start_dt or e_ > end_dt:
+            errors.append(f"{d}: must fall inside the visit ({start_dt:%d %b %H:%M} - {end_dt:%d %b %H:%M}).")
+        rows.append((d, s_, e_))
+    rows.sort(key=lambda x: x[1])
+    for a, b in zip(rows, rows[1:]):
+        if b[1] < a[2]:
+            errors.append(f"{a[0]} and {b[0]} overlap - a patient can only be in one department at a time.")
+    if not rows:
+        errors.append("Log at least one department visit.")
+    return rows, errors
+
+
+def department_summary_df(rows, total_hours):
+    """Hours per department. Any time not inside a department (waiting, moving between
+    departments) is shown on its own line so the lines always add up to the total."""
+    data, used = [], 0.0
+    for d, s_, e_ in rows:
+        h = round((e_ - s_).total_seconds() / 3600, 2)
+        used += h
+        data.append({"Department": d, "From": s_.strftime("%d %b %H:%M"), "To": e_.strftime("%d %b %H:%M"), "Hours": h})
+    gap = max(round(total_hours - used, 2), 0.0)
+    if gap >= 0.01:
+        data.append({"Department": "Waiting / between departments", "From": "", "To": "", "Hours": gap})
+    data.append({"Department": "Total", "From": "", "To": "", "Hours": round(sum(r["Hours"] for r in data), 2)})
+    return pd.DataFrame(data)
+
+
+def load_encounter_departments(conn, encounter_id):
+    return [(d, dt.datetime.fromisoformat(a), dt.datetime.fromisoformat(b)) for d, a, b in conn.execute(
+        "SELECT department, start_datetime, end_datetime FROM encounter_departments WHERE encounter_id = ? ORDER BY start_datetime",
+        (encounter_id,)).fetchall()]
+
+
+def load_claim_departments(conn, claim_id):
+    return [(d, dt.datetime.fromisoformat(a), dt.datetime.fromisoformat(b)) for d, a, b in conn.execute(
+        "SELECT department, start_datetime, end_datetime FROM claim_departments WHERE claim_id = ? ORDER BY start_datetime",
+        (claim_id,)).fetchall()]
+
+
+def render_department_hours(rows, total_hours):
+    st.subheader("Time in each department")
+    if not rows:
+        st.caption("No department log was recorded for this visit.")
+        return
+    tbl = department_summary_df(rows, total_hours)
+    st.dataframe(tbl, use_container_width=True, hide_index=True)
+    chart = tbl[~tbl["Department"].isin(["Total"])].set_index("Department")["Hours"]
+    st.bar_chart(chart, height=200)
+
+
 def record_encounter_page(conn, artifacts):
     st.header("Record encounter")
     facility = require_facility(conn, artifacts)
@@ -1191,6 +1344,24 @@ def record_encounter_page(conn, artifacts):
             "Qty": st.column_config.NumberColumn("Qty", min_value=1, step=1, default=1),
         },
     )
+    st.subheader("Time in each department")
+    sig = f"{encounter_type}|{start_dt.isoformat()}|{end_dt.isoformat()}"
+    dept_df0 = pd.DataFrame(default_department_rows(encounter_type, start_dt, end_dt), columns=["Department", "Start", "End"])
+    dept_df0["Start"], dept_df0["End"] = pd.to_datetime(dept_df0["Start"]), pd.to_datetime(dept_df0["End"])
+    dept_edit = st.data_editor(
+        dept_df0, num_rows="dynamic", use_container_width=True, key=f"rec_dept_{sig}",
+        column_config={
+            "Department": st.column_config.SelectboxColumn("Department", options=DEPARTMENTS, required=True),
+            "Start": st.column_config.DatetimeColumn("Start", format="YYYY-MM-DD HH:mm", step=60, required=True),
+            "End": st.column_config.DatetimeColumn("End", format="YYYY-MM-DD HH:mm", step=60, required=True),
+        },
+    )
+    dept_rows, dept_errors = check_departments(dept_edit, start_dt, end_dt)
+    for msg in dept_errors:
+        st.warning(msg)
+    if not dept_errors:
+        st.dataframe(department_summary_df(dept_rows, max((end_dt - start_dt).total_seconds() / 3600, 0.0)),
+                     use_container_width=True, hide_index=True)
     notes = st.text_area("Clinical notes (optional)")
     if st.button("Save encounter", type="primary"):
         valid = [(r["Item"], float(r["Qty"]) if pd.notna(r["Qty"]) else 1.0)
@@ -1199,6 +1370,8 @@ def record_encounter_page(conn, artifacts):
             st.error("End can't be before start.")
         elif not valid:
             st.error("Add at least one service, medication or test.")
+        elif dept_errors:
+            st.error("Fix the department log first: " + dept_errors[0])
         else:
             cur = conn.execute(
                 "INSERT INTO encounters (patient_id, provider_id, recorded_by, recorded_at, encounter_type, "
@@ -1209,6 +1382,9 @@ def record_encounter_page(conn, artifacts):
             eid = cur.lastrowid
             for item, qty in valid:
                 conn.execute("INSERT INTO encounter_items (encounter_id, item, qty) VALUES (?,?,?)", (eid, item, qty))
+            for d, a, b in dept_rows:
+                conn.execute("INSERT INTO encounter_departments (encounter_id, department, start_datetime, end_datetime) VALUES (?,?,?,?)",
+                             (eid, d, a.isoformat(), b.isoformat()))
             conn.commit()
             st.success(f"Encounter E-{eid} saved. It now appears on Submit claim (provider) as an unbilled encounter.")
 
@@ -1439,6 +1615,9 @@ def submit_claim_page(conn, model, artifacts, gs_artifacts=None):
         render_bed_panel(conn, provider_id, admission_dt)
 
     # ---------------- itemised bill ----------------
+    if enc is not None:
+        render_department_hours(load_encounter_departments(conn, enc["id"]), length_of_stay)
+
     st.divider()
     st.subheader("Itemised bill")
     if st.session_state.get("bill_bundle_for") != (encounter_type, ek):
@@ -1534,6 +1713,9 @@ def submit_claim_page(conn, model, artifacts, gs_artifacts=None):
         save_claim_items(conn, new_claim_id, lines)
         if enc is not None:
             conn.execute("UPDATE encounters SET status = 'billed', claim_id = ? WHERE id = ?", (new_claim_id, enc["id"]))
+            for d, a, b in load_encounter_departments(conn, enc["id"]):
+                conn.execute("INSERT INTO claim_departments (claim_id, department, start_datetime, end_datetime, hours) VALUES (?,?,?,?,?)",
+                             (new_claim_id, d, a.isoformat(), b.isoformat(), round((b - a).total_seconds() / 3600, 2)))
             conn.commit()
 
         st.divider()
@@ -1872,6 +2054,8 @@ def claim_detail_page(conn, model, artifacts, claim_id, role):
             over = idf[idf["Billed (KES)"] > idf["Tariff (KES)"] * 1.5]
             if not over.empty:
                 st.warning("Billed well above tariff: " + "; ".join(over["Item"].tolist()))
+        dept_rows_detail = load_claim_departments(conn, cid)
+        render_department_hours(dept_rows_detail, los)
 
     with col_right:
         st.subheader("Fraud risk score")
@@ -2064,6 +2248,7 @@ def claim_detail_page(conn, model, artifacts, claim_id, role):
         report_flags, shap_lines,
         [(submitted_at, submitted_by, "submitted", f"scored {label}")] + [(t, a, ty, d) for t, a, ty, d in ev_rows],
         items=[(c, i, q, tp, bp) for c, i, q, tp, bp in item_rows],
+        departments=department_summary_df(dept_rows_detail, los) if dept_rows_detail else pd.DataFrame(),
     )
     st.download_button("Download claim report (.txt)", report_text,
                        file_name=f"claim_{cid}_report.txt", mime="text/plain")
@@ -2444,6 +2629,127 @@ def model_health_page(gs_artifacts):
                    "flagged cluster, the claim is routed to manual audit; otherwise XGBoost alone decides.")
 
 
+
+# ============================================================
+# LIVE UPDATES
+# ============================================================
+LIVE_POLL_SECONDS = 5
+LIVE_REFRESH_PAGES = ("Claims dashboard", "Audit history", "Analytics", "Provider profile")
+
+# Which sidebar page "owns" each unread stream, per role. Opening that page clears
+# its badge, the way opening a chat clears its count. Patients have no list page of
+# their own, so the count rides on the page each role would act on: the nurse's
+# "Register patient" (which lists recently registered patients) and the provider's
+# "Submit claim" (where a patient is picked). An auditor has no patient page at all,
+# so auditors carry a claims badge only.
+BADGE_OWNER_PAGE = {
+    "nurse":    {"p": "Register patient"},
+    "provider": {"p": "Submit claim", "c": "Claims dashboard"},
+    "auditor":  {"c": "Claims dashboard"},
+}
+try:   # st.markdown grew coloured badges in Streamlit 1.44; older versions fall back to "(3)"
+    _BADGE_MD = tuple(int(x) for x in st.__version__.split(".")[:2]) >= (1, 44)
+except Exception:
+    _BADGE_MD = False
+
+
+def _live_scope(conn):
+    """(facility or None, role) for the logged-in user. Facility roles only see their own facility."""
+    return current_facility(conn), st.session_state.get("role")
+
+
+def _stream_heads(conn):
+    """Newest row id in each watched table."""
+    return {"p": conn.execute("SELECT COALESCE(MAX(rowid),0) FROM patients").fetchone()[0],
+            "c": conn.execute("SELECT COALESCE(MAX(id),0) FROM claims_log").fetchone()[0]}
+
+
+def badge_text(n):
+    """The little red number next to a menu item. Empty when there is nothing new."""
+    if not n:
+        return ""
+    label = "99+" if n > 99 else str(n)
+    return f"  :red-badge[{label}]" if _BADGE_MD else f"  ({label})"
+
+
+def nav_label(page, counts, role):
+    """Menu caption for one page, with its unread count appended when it has one."""
+    owned = BADGE_OWNER_PAGE.get(role, {})
+    return page + badge_text(sum(n for stream, n in counts.items() if owned.get(stream) == page))
+
+
+def unseen_counts(conn):
+    """How many new patients / claims this user has not looked at yet.
+
+    "New" means created after the marker this session last cleared, by somebody else,
+    and inside this user's own facility for facility roles - the same scope the old
+    toast notifications used. Returns {"p": n, "c": n} for the streams this role has."""
+    role = st.session_state.get("role")
+    me = st.session_state.get("username")
+    streams = BADGE_OWNER_PAGE.get(role, {})
+    if not streams:
+        return {}
+    fac = current_facility(conn)
+    if role in FACILITY_ROLES and not fac:
+        return {}
+    seen = st.session_state.get("live_seen")
+    if seen is None:          # first run after login: treat everything already there as read
+        st.session_state.live_seen = _stream_heads(conn)
+        return {k: 0 for k in streams}
+    out = {}
+    for stream in streams:
+        if stream == "p":
+            q = ("SELECT COUNT(*) FROM patients p LEFT JOIN users u ON u.username = p.registered_by "
+                 "WHERE p.rowid > ? AND p.registered_by != ?")
+            args = [seen["p"], me]
+            if role in FACILITY_ROLES:
+                q += " AND u.provider_id = ?"
+                args.append(fac)
+        else:
+            q = "SELECT COUNT(*) FROM claims_log WHERE id > ? AND submitted_by != ?"
+            args = [seen["c"], me]
+            if role == "provider":
+                q += " AND provider_id = ?"
+                args.append(fac)
+        out[stream] = conn.execute(q, args).fetchone()[0]
+    return out
+
+
+def mark_stream_seen(conn, page):
+    """Opening a page clears its badge: its marker moves up to the newest row."""
+    head = _stream_heads(conn)
+    seen = st.session_state.get("live_seen")
+    if seen is None:
+        st.session_state.live_seen = head
+        return
+    for stream, owner_page in BADGE_OWNER_PAGE.get(st.session_state.get("role"), {}).items():
+        if page == owner_page:
+            seen[stream] = head[stream]
+    st.session_state.live_seen = seen
+
+
+@st.fragment(run_every=LIVE_POLL_SECONDS)
+def nav_with_badges(conn, nav_options, current_page):
+    """The sidebar menu, re-drawn by itself every few seconds.
+
+    Running the menu as a fragment means the badge numbers refresh on their own
+    without re-running the rest of the page, so a half-filled claim form is never
+    wiped by an arriving notification - the problem the old toast version had to
+    work around by refusing to refresh form pages at all. A click on a different
+    page, and a new row landing while a list page is open, both ask for a full
+    re-run; the marker in st.session_state.live_refreshed stops that repeating."""
+    role = st.session_state.get("role")
+    counts = unseen_counts(conn)
+    chosen = st.sidebar.radio("Navigate", nav_options,
+                              format_func=lambda p: nav_label(p, counts, role), key="nav_page")
+    if chosen != current_page:
+        st.rerun(scope="app")
+    head = _stream_heads(conn)
+    last = st.session_state.get("live_refreshed") or head
+    if current_page in LIVE_REFRESH_PAGES and (head["p"] > last["p"] or head["c"] > last["c"]):
+        st.rerun(scope="app")
+
+
 # ============================================================
 # MAIN
 # ============================================================
@@ -2484,12 +2790,20 @@ def main():
         nav_options += ["Manage users", "Model Health"]
 
     nav_options.append("Change password")
-    page = st.sidebar.radio("Navigate", nav_options)
+    if st.session_state.get("nav_page") not in nav_options:
+        st.session_state.pop("nav_page", None)   # role changed: forget a page this role cannot open
+    page = st.session_state.get("nav_page", nav_options[0])
+    mark_stream_seen(conn, page)                 # the page being opened has its badge cleared
+    st.session_state.live_refreshed = _stream_heads(conn)
+    nav_with_badges(conn, nav_options, page)
+    page = st.session_state.get("nav_page", page)
     if page != "Claims dashboard":
         st.session_state.selected_claim_id = None
 
     if st.sidebar.button("Log out"):
         st.session_state.logged_in = False
+        st.session_state.live_seen = None
+        st.session_state.pop("nav_page", None)
         st.rerun()
 
     if page == "Register patient":
