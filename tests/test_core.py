@@ -153,7 +153,34 @@ def _scored(model, artifacts, ratio, conn):
 def test_model_scores_heavy_upcoding_far_above_a_normal_claim(model_and_artifacts):
     model, artifacts = model_and_artifacts
     conn = app.get_db()
-    assert _scored(model, artifacts, 3.5, conn) > 0.7073 > _scored(model, artifacts, 1.4, conn)
+    # The v3 model alone no longer scores a crude 3.5x claim above the HIGH threshold
+    # (such outliers are often legitimate in the noisy training data), so the guarantee
+    # is now given by the model plus the extreme-cost rule inside hybrid_label().
+    def label(ratio):
+        proba = _scored(model, artifacts, ratio, conn)
+        return app.hybrid_label(proba, None, artifacts, None, claim_ratio=ratio)[0]
+    assert label(3.5) == "HIGH"
+    assert label(1.4) != "HIGH"
+
+def test_extreme_cost_rule_escalates_a_low_scoring_claim():
+    arts = dict(ARTIFACTS, extreme_ratio_rule=3.0)
+    label, why = app.hybrid_label(0.01, None, arts, GS, claim_ratio=3.5)
+    assert label == "HIGH" and "extreme cost rule" in why
+
+def test_extreme_cost_rule_does_not_fire_below_the_limit():
+    arts = dict(ARTIFACTS, extreme_ratio_rule=3.0)
+    assert app.hybrid_label(0.01, None, arts, GS, claim_ratio=2.0)[0] == "LOW"
+
+def test_provider_profile_features_present_and_fall_back_for_unknown_provider(model_and_artifacts):
+    _, artifacts = model_and_artifacts
+    conn = app.get_db()
+    raw = {"PROVIDER_ID": "unknown-provider", "PRIMARY_CONDITION": artifacts["conditions"][0], "PATIENT_COUNTY": "Nairobi",
+           "ENCOUNTER_TYPE": "outpatient", "GENDER": "F", "SERVICE_DATE": "2026-10-05", "AGE": 40,
+           "LENGTH_OF_STAY_HOURS": 4.0, "BASE_COST_KES": 3000.0, "CLAIM_AMOUNT_KES": 3300.0,
+           "PAYER_COVERAGE_KES": 2500.0, "CLAIM_TO_BASE_RATIO": 1.1}
+    feat = app.engineer_row(raw, artifacts, conn)
+    assert feat["PROV_VOL"] == artifacts["provider_profile_global"]["vol"]
+    assert set(artifacts["feature_columns"]) <= set(feat)
 
 # ---------------------------------------------------------------- unread badges
 @pytest.mark.parametrize("n,expected", [(0, ""), (1, "1"), (12, "12"), (99, "99"), (100, "99+"), (5000, "99+")])
@@ -324,3 +351,125 @@ def test_a_patient_from_another_facility_does_not_badge_this_nurse(fresh_app):
     conn.commit(); conn.close()
     at.run()
     assert _nav(at) == ["Register patient", "Record encounter", "Change password"]
+
+
+# ---- patients are separated by facility
+def _two_facility_patients(db):
+    conn = sqlite3.connect(db)
+    ny = conn.execute("SELECT provider_id FROM users WHERE username='nurse_nyalenda'").fetchone()[0]
+    kj = conn.execute("SELECT provider_id FROM users WHERE username='nurse_kajiado'").fetchone()[0]
+    for pid, first, fac in (("PNY1", "Wanjiru", ny), ("PKJ1", "Lemayian", kj)):
+        conn.execute("INSERT INTO patients(patient_id, first_name, last_name, gender, dob, age, county, "
+                     "registered_by, registered_at, scheme, facility_id) VALUES "
+                     "(?,?,'Test','F','1990-01-01',36,'Nairobi','x','2026-11-06T10:00:00','SHA',?)", (pid, first, fac))
+    conn.commit(); conn.close()
+
+def _patient_options(at):
+    sb = next(s for s in at.selectbox if s.label == "Patient")
+    return list(sb.options)
+
+def test_nurse_does_not_see_another_facilitys_patients(fresh_app):
+    at, db = fresh_app
+    _two_facility_patients(db)
+    _login(at, "nurse_kajiado")
+    at.sidebar.radio[0].set_value("Record encounter"); at.run()
+    opts = " ".join(_patient_options(at))
+    assert "PKJ1" in opts and "PNY1" not in opts
+
+def test_provider_manual_claim_patient_list_is_facility_only(fresh_app):
+    at, db = fresh_app
+    _two_facility_patients(db)
+    _login(at, "kajiado_health_centre")
+    at.sidebar.radio[0].set_value("Submit claim"); at.run()
+    at.radio[0].set_value("Enter details manually"); at.run()
+    opts = " ".join(str(o) for o in _patient_options(at))
+    assert "PKJ1" in opts and "PNY1" not in opts
+
+def test_recently_registered_list_is_facility_only(fresh_app):
+    at, db = fresh_app
+    _two_facility_patients(db)
+    _login(at, "nurse_nyalenda")
+    at.sidebar.radio[0].set_value("Register patient"); at.run()
+    shown = " ".join(str(df.value.to_string()) for df in at.dataframe)
+    assert "PNY1" in shown and "PKJ1" not in shown
+
+def test_patient_scope_is_unrestricted_for_roles_that_are_not_facility_bound(tmp_path):
+    """Auditors and administrators are not facility-bound, so the scope adds no filter."""
+    conn = sqlite3.connect(tmp_path / "x.db")
+    sql, args = app.patient_scope(conn)      # no facility role in the session
+    assert sql == "" and args == ()
+    conn.close()
+
+
+# ---- auditors can be tied to one insurer
+def _insurer_claims(db, per_scheme=3):
+    """per_scheme claims under each of the first two schemes; returns (scheme_a, scheme_b)."""
+    a, b = cref.SCHEME_CHOICES[0], cref.SCHEME_CHOICES[1]
+    conn = sqlite3.connect(db)
+    for sch in (a, b):
+        for _ in range(per_scheme):
+            conn.execute("INSERT INTO claims_log(submitted_at, submitted_by, source, provider_id, claim_amount_kes, "
+                         "fraud_score, risk_label, review_status, scheme) VALUES "
+                         "('2026-11-02T10:00:00','t','csv','P1',1000,0.9,'HIGH','pending',?)", (sch,))
+    conn.commit(); conn.close()
+    return a, b
+
+def _add_scoped_auditor(db, username, insurer):
+    conn = sqlite3.connect(db)
+    h, salt = app.hash_password("Demo@2026")
+    conn.execute("INSERT INTO users(username,password_hash,salt,role,insurer) VALUES (?,?,?,'auditor',?)",
+                 (username, h, salt, insurer))
+    conn.commit(); conn.close()
+
+def test_insurer_auditor_dashboard_shows_only_own_insurer(fresh_app):
+    at, db = fresh_app
+    a, b = _insurer_claims(db)
+    _add_scoped_auditor(db, "aud_a", a)
+    _login(at, "aud_a")
+    at.sidebar.radio[0].set_value("Claims dashboard"); at.run()
+    assert at.metric[0].value == "3"          # 3 of the 6 claims
+
+def test_auditor_without_insurer_sees_every_insurer(fresh_app):
+    at, db = fresh_app
+    _insurer_claims(db)
+    _add_scoped_auditor(db, "aud_all", None)
+    _login(at, "aud_all")
+    at.sidebar.radio[0].set_value("Claims dashboard"); at.run()
+    assert at.metric[0].value == "6"
+
+def test_insurer_auditor_cannot_open_another_insurers_claim(fresh_app):
+    at, db = fresh_app
+    a, b = _insurer_claims(db)
+    conn = sqlite3.connect(db)
+    other_id = conn.execute("SELECT MIN(id) FROM claims_log WHERE scheme = ?", (b,)).fetchone()[0]
+    conn.close()
+    _add_scoped_auditor(db, "aud_a2", a)
+    _login(at, "aud_a2")
+    at.sidebar.radio[0].set_value("Claims dashboard"); at.run()
+    at.session_state["selected_claim_id"] = other_id; at.run()
+    assert any("different insurer" in e.value for e in at.error)
+
+def test_insurer_auditor_audit_history_and_analytics_are_scoped(fresh_app):
+    at, db = fresh_app
+    a, b = _insurer_claims(db)
+    _add_scoped_auditor(db, "aud_a3", a)
+    _login(at, "aud_a3")
+    at.sidebar.radio[0].set_value("Audit history"); at.run()
+    assert at.metric[0].value == "3"
+    at.sidebar.radio[0].set_value("Analytics"); at.run()
+    assert at.metric[0].value == "3"
+
+def test_new_claims_for_another_insurer_do_not_badge_an_insurer_auditor(fresh_app):
+    at, db = fresh_app
+    a, b = _insurer_claims(db, per_scheme=1)
+    _add_scoped_auditor(db, "aud_a4", a)
+    _login(at, "aud_a4")
+    at.sidebar.radio[0].set_value("Audit history"); at.run()      # sit away from the claims page
+    conn = sqlite3.connect(db)
+    for _ in range(2):
+        conn.execute("INSERT INTO claims_log(submitted_at, submitted_by, source, provider_id, claim_amount_kes, "
+                     "fraud_score, risk_label, review_status, scheme) VALUES "
+                     "('2026-11-06T10:00:00','someone','csv','P1',1000,0.9,'HIGH','pending',?)", (b,))
+    conn.commit(); conn.close()
+    at.run()
+    assert _nav(at)[0] == "Claims dashboard"        # no "(2)" / badge text appended

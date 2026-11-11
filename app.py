@@ -74,6 +74,14 @@ FEATURE_LABELS = {
     "COST_RATIO": "Cost ratio vs. similar claims",
     "PROVIDER_Z_SCORE": "Provider cost z-score",
     "PROVIDER_DAILY_VOLUME": "Provider daily claim volume",
+    "PROV_VOL": "Provider total claim volume",
+    "PROV_NPAT": "Provider distinct patients",
+    "PROV_CLAIMS_PER_PAT": "Provider claims per patient",
+    "PROV_MED_RATIO": "Provider typical claim-to-base ratio",
+    "PROV_P90_RATIO": "Provider high-end claim-to-base ratio",
+    "RATIO_VS_PROV": "Claim ratio vs. this provider's typical ratio",
+    "PROV_MEAN_LOS": "Provider average length of stay",
+    "LOS_VS_PROV": "Length of stay vs. this provider's average",
     "AGE": "Patient age",
     "LENGTH_OF_STAY_HOURS": "Length of stay (hours)",
     "GEOGRAPHIC_MISMATCH": "Geographic mismatch (facility outside patient's county)",
@@ -655,6 +663,22 @@ def get_db():
         conn.execute("ALTER TABLE patients ADD COLUMN scheme TEXT")
         conn.commit()
 
+    # Auditor accounts can be tied to one insurer (users.insurer); NULL means "all insurers".
+    users_cols = {row[1] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
+    if "insurer" not in users_cols:
+        conn.execute("ALTER TABLE users ADD COLUMN insurer TEXT")
+        conn.commit()
+
+    # Each patient belongs to the facility where they were registered, so that
+    # nurse and provider accounts only ever see their own facility's patients.
+    if "facility_id" not in patients_cols:
+        conn.execute("ALTER TABLE patients ADD COLUMN facility_id TEXT")
+    conn.execute(
+        "UPDATE patients SET facility_id = (SELECT provider_id FROM users WHERE users.username = patients.registered_by) "
+        "WHERE facility_id IS NULL"
+    )
+    conn.commit()
+
     claims_cols = {row[1] for row in conn.execute("PRAGMA table_info(claims_log)").fetchall()}
     for col, ddl in [
         ("review_status", "ALTER TABLE claims_log ADD COLUMN review_status TEXT DEFAULT 'pending'"),
@@ -774,6 +798,26 @@ def engineer_row(raw: dict, artifacts: dict, conn) -> dict:
     # (clinical-inconsistency signal)
     clinical_inconsistency = int(str(gender) == "M" and condition in MATERNITY_CONDITIONS)
 
+    # Provider-level profile features (v3 model). They come from the stored
+    # provider profile (computed once from the reference claims); a provider
+    # without a profile falls back to the median profile, and the ratio
+    # features then compare the claim with that median.
+    prof = artifacts.get("provider_profile_lookup", {}).get(provider_id) or artifacts.get("provider_profile_global")
+    prov_extra = {}
+    if prof:
+        vol, npat = prof["vol"], prof["npat"]
+        med_r, los_m = prof["med_ratio"], prof["mean_los"]
+        prov_extra = {
+            "PROV_VOL": vol,
+            "PROV_NPAT": npat,
+            "PROV_CLAIMS_PER_PAT": vol / npat if npat else np.nan,
+            "PROV_MED_RATIO": med_r,
+            "PROV_P90_RATIO": prof["p90_ratio"],
+            "RATIO_VS_PROV": (raw["CLAIM_TO_BASE_RATIO"] / med_r) if med_r else np.nan,
+            "PROV_MEAN_LOS": los_m,
+            "LOS_VS_PROV": (raw["LENGTH_OF_STAY_HOURS"] / los_m) if los_m else np.nan,
+        }
+
     feat = {
         "BASE_COST_KES": raw["BASE_COST_KES"],
         "CLAIM_AMOUNT_KES": claim_amount,
@@ -787,6 +831,7 @@ def engineer_row(raw: dict, artifacts: dict, conn) -> dict:
         "GEOGRAPHIC_MISMATCH": geographic_mismatch,
         "CLINICAL_INCONSISTENCY": clinical_inconsistency,
     }
+    feat.update(prov_extra)
 
     # One-hot encode the three categorical fields exactly the way
     # export_model_artifacts.py built them (pd.get_dummies, prefix=col) -
@@ -876,7 +921,7 @@ def provider_cluster_exposure(provider_id):
 
 
 def hybrid_label(xgb_proba: float, gs_score, artifacts: dict, gs_artifacts: dict | None,
-                 provider_id=None) -> tuple[str, str]:
+                 provider_id=None, claim_ratio=None) -> tuple[str, str]:
     """Combines the two models with an OR rule: escalate to HIGH whenever
     EITHER model's own tuned threshold fires (validated in
     hybrid_ensemble_eval.py / tune_hybrid_threshold.py - the two models'
@@ -897,6 +942,12 @@ def hybrid_label(xgb_proba: float, gs_score, artifacts: dict, gs_artifacts: dict
         if in_cluster:
             return "HIGH", "both models (cost anomaly + provider in a flagged relational cluster)"
         return "HIGH", "cost anomaly (XGBoost)"
+    # Business rule (v3): a claim billed at several times the base cost is
+    # escalated even when the learned model, trained partly on data where
+    # such outliers are often legitimate, scores it low.
+    rule_ratio = artifacts.get("extreme_ratio_rule")
+    if rule_ratio is not None and claim_ratio is not None and claim_ratio >= rule_ratio:
+        return "HIGH", f"extreme cost rule (claim is {rule_ratio:g}x or more above the base cost)"
     if in_cluster:
         return "MEDIUM", "provider in a flagged relational cluster (GraphSAGE, provider-level)"
     if xgb_lab == "MEDIUM":
@@ -1094,6 +1145,51 @@ def current_facility(conn):
     return r[0] if r and r[0] else None
 
 
+def patient_scope(conn, alias="p"):
+    """SQL fragment + parameters limiting a patients query to what this user may see.
+
+    Nurse and provider accounts see only patients registered at their own facility,
+    plus patients who have an encounter or a claim there. A facility account that is
+    not linked to a facility sees nobody. Auditors and administrators see everyone."""
+    if st.session_state.get("role") not in FACILITY_ROLES:
+        return "", ()
+    fac = current_facility(conn)
+    if not fac:
+        return " AND 0", ()
+    return (f" AND ({alias}.facility_id = ? "
+            f"OR {alias}.registered_by IN (SELECT username FROM users WHERE provider_id = ?) "
+            f"OR {alias}.patient_id IN (SELECT patient_id FROM encounters WHERE provider_id = ?) "
+            f"OR {alias}.patient_id IN (SELECT patient_id FROM claims_log WHERE provider_id = ?))",
+            (fac, fac, fac, fac))
+
+
+def current_insurer(conn):
+    """The insurer (scheme) the logged-in AUDITOR account is tied to, or None for all insurers."""
+    if st.session_state.get("role") != "auditor":
+        return None
+    r = conn.execute("SELECT insurer FROM users WHERE username = ?",
+                     (st.session_state.get("username"),)).fetchone()
+    return r[0] if r and r[0] else None
+
+
+def insurer_scope(conn, column="scheme"):
+    """SQL fragment + parameters limiting a claims query to the auditor's own insurer.
+
+    An auditor tied to an insurer sees only claims under that scheme (claims with no
+    scheme recorded are visible only to auditors who are not tied to an insurer).
+    Everyone else is unaffected by this filter."""
+    ins = current_insurer(conn)
+    if not ins:
+        return "", ()
+    return f" AND {column} = ?", (ins,)
+
+
+def show_insurer_scope(conn):
+    ins = current_insurer(conn)
+    if ins:
+        st.caption(f"Insurer: {ins} - you see only this insurer's claims.")
+
+
 def facility_label(artifacts, pid):
     org_id = artifacts["provider_org_lookup"].get(pid, "unknown")
     return f"{artifacts.get('organization_names', {}).get(org_id, 'Facility ' + org_id[:8])}  ·  Provider {pid[:8]}"
@@ -1115,6 +1211,8 @@ def require_facility(conn, artifacts):
 
 def register_patient_page(conn, artifacts):
     st.header("Register patient")
+    if require_facility(conn, artifacts) is False:
+        return
     with st.form("register_patient_form", clear_on_submit=True):
         c1, c2 = st.columns(2)
         with c1:
@@ -1142,9 +1240,10 @@ def register_patient_page(conn, artifacts):
             patient_id = f"P-{88200 + count + 1}"
             conn.execute(
                 "INSERT INTO patients (patient_id, first_name, last_name, gender, dob, age, county, "
-                "registered_by, registered_at, scheme) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                "registered_by, registered_at, scheme, facility_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 (patient_id, first_name.strip(), last_name.strip(), gender, dob.isoformat(), age, county,
-                 st.session_state.username, dt.datetime.now().isoformat(timespec="seconds"), scheme),
+                 st.session_state.username, dt.datetime.now().isoformat(timespec="seconds"), scheme,
+                 current_facility(conn)),
             )
             conn.commit()
             st.success("✓ Patient registered successfully")
@@ -1153,11 +1252,12 @@ def register_patient_page(conn, artifacts):
 
     st.divider()
     st.subheader("Recently registered")
+    scope_sql, scope_args = patient_scope(conn, "p")
     df = pd.read_sql_query(
-        "SELECT patient_id AS \"Patient ID\", first_name || ' ' || last_name AS Name, "
-        "gender AS Gender, dob AS dob_raw, age AS age_fallback, "
-        "county AS County FROM patients ORDER BY registered_at DESC LIMIT 20",
-        conn,
+        "SELECT p.patient_id AS \"Patient ID\", p.first_name || ' ' || p.last_name AS Name, "
+        "p.gender AS Gender, p.dob AS dob_raw, p.age AS age_fallback, "
+        "p.county AS County FROM patients p WHERE 1=1" + scope_sql + " ORDER BY p.registered_at DESC LIMIT 20",
+        conn, params=scope_args,
     )
     if df.empty:
         st.caption("No patients registered yet.")
@@ -1297,9 +1397,11 @@ def record_encounter_page(conn, artifacts):
     facility = require_facility(conn, artifacts)
     if facility is False:
         return
+    scope_sql, scope_args = patient_scope(conn, "p")
     patients_df = pd.read_sql_query(
-        "SELECT patient_id, first_name, last_name, gender, county FROM patients ORDER BY registered_at DESC LIMIT 300",
-        conn,
+        "SELECT p.patient_id, p.first_name, p.last_name, p.gender, p.county FROM patients p WHERE 1=1"
+        + scope_sql + " ORDER BY p.registered_at DESC LIMIT 300",
+        conn, params=scope_args,
     )
     if patients_df.empty:
         st.info("Register a patient first (Register patient page), then record their encounter here.")
@@ -1517,10 +1619,11 @@ def submit_claim_page(conn, model, artifacts, gs_artifacts=None):
     ek = enc["id"] if enc else "manual"
     lock = enc is not None
 
+    scope_sql, scope_args = patient_scope(conn, "p")
     patients_df = pd.read_sql_query(
-        "SELECT patient_id, first_name, last_name, dob, age FROM patients "
-        "ORDER BY registered_at DESC LIMIT 300",
-        conn,
+        "SELECT p.patient_id, p.first_name, p.last_name, p.dob, p.age FROM patients p WHERE 1=1"
+        + scope_sql + " ORDER BY p.registered_at DESC LIMIT 300",
+        conn, params=scope_args,
     )
     if enc is not None:
         patient_id = enc["patient_id"]
@@ -1708,7 +1811,7 @@ def submit_claim_page(conn, model, artifacts, gs_artifacts=None):
         feat = engineer_row(raw, artifacts, conn)
         score, xgb_only_label = score_row(feat, model, artifacts)
         gs_score = graphsage_ring_score(patient_id, provider_id, gs_artifacts)
-        label, flagged_by = hybrid_label(score, gs_score, artifacts, gs_artifacts, provider_id)
+        label, flagged_by = hybrid_label(score, gs_score, artifacts, gs_artifacts, provider_id, claim_ratio=claim_to_base_ratio)
         new_claim_id = log_claim(conn, raw, "manual", st.session_state.username, score, label, gs_score, flagged_by)
         save_claim_items(conn, new_claim_id, lines)
         if enc is not None:
@@ -1804,7 +1907,7 @@ def upload_csv_page(conn, model, artifacts, gs_artifacts=None):
         feat = engineer_row(raw, artifacts, conn)
         score, _ = score_row(feat, model, artifacts)
         gs_score = graphsage_ring_score(raw["PATIENT_ID"], raw["PROVIDER_ID"], gs_artifacts)
-        label, flagged_by = hybrid_label(score, gs_score, artifacts, gs_artifacts, raw["PROVIDER_ID"])
+        label, flagged_by = hybrid_label(score, gs_score, artifacts, gs_artifacts, raw["PROVIDER_ID"], claim_ratio=raw["CLAIM_TO_BASE_RATIO"])
         log_claim(conn, raw, "csv", st.session_state.username, score, label, gs_score, flagged_by)
         scores.append(score)
         labels.append(label)
@@ -1835,11 +1938,13 @@ def upload_csv_page(conn, model, artifacts, gs_artifacts=None):
 # ============================================================
 def history_page(conn):
     st.header("Audit history")
+    show_insurer_scope(conn)
+    ins_sql, ins_args = insurer_scope(conn)
     df = pd.read_sql_query(
         "SELECT submitted_at, submitted_by, source, patient_id, provider_id, encounter_type, "
-        "claim_amount_kes, fraud_score, risk_label, review_status FROM claims_log "
-        "ORDER BY id DESC LIMIT 500",
-        conn,
+        "claim_amount_kes, fraud_score, risk_label, review_status FROM claims_log WHERE 1=1"
+        + ins_sql + " ORDER BY id DESC LIMIT 500",
+        conn, params=ins_args,
     )
     if df.empty:
         st.info("No claims scored yet.")
@@ -1866,8 +1971,12 @@ def claims_dashboard_page(conn, artifacts):
     facility = require_facility(conn, artifacts)
     if facility is False:
         return
-    where = "WHERE provider_id = ? " if is_provider else ""
+    where = "WHERE provider_id = ? " if is_provider else "WHERE 1=1 "
     params = (facility,) if is_provider else ()
+    show_insurer_scope(conn)
+    ins_sql, ins_args = insurer_scope(conn)
+    where += ins_sql + " "
+    params = params + ins_args
     df = pd.read_sql_query(
         "SELECT id, submitted_at, patient_id, provider_id, primary_condition, "
         "claim_amount_kes, fraud_score, risk_label, review_status, "
@@ -2003,6 +2112,12 @@ def claim_detail_page(conn, model, artifacts, claim_id, role):
     if role == "provider" and provider_id != current_facility(conn):
         st.error("You can only open claims for your own facility.")
         return
+    _ins = current_insurer(conn)
+    if _ins:
+        _claim_scheme = conn.execute("SELECT scheme FROM claims_log WHERE id = ?", (cid,)).fetchone()
+        if not _claim_scheme or _claim_scheme[0] != _ins:
+            st.error("This claim belongs to a different insurer.")
+            return
 
     st.header(f"Claim #{cid}")
 
@@ -2067,7 +2182,7 @@ def claim_detail_page(conn, model, artifacts, claim_id, role):
         if gs_score is None and gs_artifacts is not None:
             gs_score = graphsage_ring_score(patient_id, provider_id, gs_artifacts)
             if flagged_by is None:
-                _, flagged_by = hybrid_label(score, gs_score, artifacts, gs_artifacts, provider_id)
+                _, flagged_by = hybrid_label(score, gs_score, artifacts, gs_artifacts, provider_id, claim_ratio=ratio)
 
         sc1, sc2, sc3 = st.columns([1, 1, 1.5])
         with sc1:
@@ -2259,10 +2374,12 @@ def claim_detail_page(conn, model, artifacts, claim_id, role):
 # ============================================================
 def analytics_page(conn):
     st.header("Fraud analytics overview")
+    show_insurer_scope(conn)
+    ins_sql, ins_args = insurer_scope(conn)
     df = pd.read_sql_query(
         "SELECT submitted_at, provider_id, fraud_score, risk_label, "
-        "graphsage_score, flagged_by, scheme FROM claims_log",
-        conn,
+        "graphsage_score, flagged_by, scheme FROM claims_log WHERE 1=1" + ins_sql,
+        conn, params=ins_args,
     )
     if df.empty:
         st.info("No claims scored yet.")
@@ -2385,10 +2502,11 @@ def provider_profile_page(conn, artifacts):
 
     st.divider()
     st.subheader("Claims scored through this app")
+    ins_sql, ins_args = insurer_scope(conn)
     df = pd.read_sql_query(
         "SELECT submitted_at, primary_condition, claim_amount_kes, fraud_score, "
-        "risk_label, review_status FROM claims_log WHERE provider_id = ? ORDER BY id DESC",
-        conn, params=(provider_id,),
+        "risk_label, review_status FROM claims_log WHERE provider_id = ?" + ins_sql + " ORDER BY id DESC",
+        conn, params=(provider_id,) + ins_args,
     )
     if df.empty:
         st.info("No claims logged for this provider yet through the dashboard.")
@@ -2457,6 +2575,9 @@ def manage_users_page(conn, artifacts):
         new_role = st.selectbox("Role", ROLES, index=0)
         new_facility = st.selectbox("Facility (required for nurse and provider accounts)", [None] + artifacts["top_providers"],
                                     format_func=lambda p: "— none —" if p is None else facility_label(artifacts, p))
+        new_insurer = st.selectbox("Insurer (auditors only; leave blank to see all insurers)",
+                                   [None] + list(cref.SCHEME_CHOICES),
+                                   format_func=lambda i: "— all insurers —" if i is None else i)
         new_password = st.text_input("New password", type="password")
         confirm_password = st.text_input("Confirm password", type="password")
         submitted = st.form_submit_button("Add user", type="primary")
@@ -2477,18 +2598,37 @@ def manage_users_page(conn, artifacts):
             else:
                 new_hash, new_salt = hash_password(new_password)
                 conn.execute(
-                    "INSERT INTO users (username, password_hash, salt, role, provider_id) VALUES (?, ?, ?, ?, ?)",
-                    (new_username, new_hash, new_salt, new_role, new_facility if new_role in FACILITY_ROLES else None),
+                    "INSERT INTO users (username, password_hash, salt, role, provider_id, insurer) VALUES (?, ?, ?, ?, ?, ?)",
+                    (new_username, new_hash, new_salt, new_role, new_facility if new_role in FACILITY_ROLES else None,
+                     new_insurer if new_role == "auditor" else None),
                 )
                 conn.commit()
                 st.success(f"User '{new_username}' created with role '{new_role}'. They can log in now.")
 
     st.divider()
     st.subheader("Existing users")
-    users_df = pd.read_sql_query("SELECT username, role, provider_id FROM users ORDER BY username", conn)
+    users_df = pd.read_sql_query("SELECT username, role, provider_id, insurer FROM users ORDER BY username", conn)
     show_df = users_df.copy()
     show_df["facility"] = show_df["provider_id"].map(lambda p: facility_label(artifacts, p) if isinstance(p, str) and p else "")
+    show_df["insurer"] = show_df.apply(
+        lambda r: (r["insurer"] if isinstance(r["insurer"], str) and r["insurer"] else "all insurers") if r["role"] == "auditor" else "",
+        axis=1)
     st.dataframe(show_df.drop(columns=["provider_id"]), use_container_width=True)
+
+    st.divider()
+    st.subheader("Assign an insurer to an auditor")
+    aud_users = users_df.loc[users_df["role"] == "auditor", "username"].tolist()
+    if aud_users:
+        ia_user = st.selectbox("Auditor account", aud_users, key="ins_user")
+        ia_ins = st.selectbox("Insurer", [None] + list(cref.SCHEME_CHOICES), key="ins_value",
+                              format_func=lambda i: "— all insurers —" if i is None else i)
+        if st.button("Assign insurer"):
+            conn.execute("UPDATE users SET insurer = ? WHERE username = ?", (ia_ins, ia_user))
+            conn.commit()
+            st.success(f"'{ia_user}' now sees " + (f"only {ia_ins} claims." if ia_ins else "all insurers' claims."))
+            st.rerun()
+    else:
+        st.caption("No auditor accounts yet.")
 
     st.divider()
     st.subheader("Assign a facility")
@@ -2711,6 +2851,9 @@ def unseen_counts(conn):
             if role == "provider":
                 q += " AND provider_id = ?"
                 args.append(fac)
+            ins_sql, ins_args = insurer_scope(conn)
+            q += ins_sql
+            args += list(ins_args)
         out[stream] = conn.execute(q, args).fetchone()[0]
     return out
 
